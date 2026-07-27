@@ -947,34 +947,6 @@ fn write_emmc(client: &mut Client, input: PathBuf, start: u32) -> Result<()> {
 
 // DemoN functions
 
-impl NandFlasher for DemonClient {
-    fn geometry(&mut self) -> Result<FlashGeometry> {
-        let _info = self.init().context("Failed to initialize DemoN device")?;
-        let nand_info = self
-            .get_nand_info()
-            .ok_or_else(|| anyhow::anyhow!("NAND device not recognized"))?;
-        Ok(FlashGeometry {
-            name: nand_info.name.to_string(),
-            chip_size_mb: nand_info.chip_size,
-            block_size: nand_info.total_block_size() as usize,
-            total_blocks: nand_info.num_blocks() as u32,
-        })
-    }
-
-    fn read_block(&mut self, block: u32, buf: &mut [u8]) -> Result<()> {
-        let _len = self
-            .read_block(block as u16, buf.len(), buf)
-            .with_context(|| format!("read block {block}"))?;
-        Ok(())
-    }
-
-    fn write_block(&mut self, block: u32, buf: &[u8]) -> Result<()> {
-        self.write_block(block as u16, buf)
-            .with_context(|| format!("write block {block}"))?;
-        Ok(())
-    }
-}
-
 fn demon_list() -> Result<()> {
     use crate::demon::usb::UsbClient;
 
@@ -1024,45 +996,6 @@ fn demon_info() -> Result<()> {
 }
 
 // LPC/XFlash functions
-
-impl NandFlasher for LpcClient {
-    fn geometry(&mut self) -> Result<FlashGeometry> {
-        self.init().context("Failed to initialize LPC/XFlash device")?;
-        let version = self.version.unwrap_or(0);
-        let config = self.flash_init().context("Failed to initialize flash")?;
-        Ok(FlashGeometry {
-            name: format!("LPC/XFlash (ARM v{version})"),
-            chip_size_mb: (config.file_size() / (1024 * 1024)) as u32,
-            block_size: 0x4200,
-            total_blocks: config.size_small_blocks,
-        })
-    }
-
-    fn read_block(&mut self, block: u32, buf: &mut [u8]) -> Result<()> {
-        let (status, data) = self.flash_read(block)?;
-        if crate::lpc::status::is_error(status) {
-            bail!("Error reading block {block}: status=0x{status:X}");
-        }
-        if data.len() != buf.len() {
-            bail!("Block read length mismatch: expected {}, got {}", buf.len(), data.len());
-        }
-        buf.copy_from_slice(&data);
-        Ok(())
-    }
-
-    fn write_block(&mut self, block: u32, buf: &[u8]) -> Result<()> {
-        let status = self.flash_write(block, buf)?;
-        if crate::lpc::status::is_error(status) {
-            bail!("Error writing block {block}: status=0x{status:X}");
-        }
-        Ok(())
-    }
-
-    fn deinit(&mut self) -> Result<()> {
-        self.flash_deinit()?;
-        Ok(())
-    }
-}
 
 fn lpc_list() -> Result<()> {
     use crate::lpc::usb::UsbClient;
