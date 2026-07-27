@@ -19,6 +19,8 @@ use crate::picoflasher::pfc::{
     CMD_STOP_SMC, CMD_WRITE_FLASH, CMD_WRITE_FLASH_MULTI, EMMC_BLOCK_BYTES, NAND_BLOCK_BYTES,
 };
 
+use crate::lpc::LpcClient;
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let timeout = Duration::from_millis(cli.timeout_ms);
@@ -41,6 +43,21 @@ fn main() -> Result<()> {
         }
         Command::DemonWriteNand { input, start } => {
             demon_write_nand(input, start)?;
+        // LPC/XFlash commands
+        Command::LpcInfo => {
+            lpc_info()?;
+            println!("ok");
+        }
+        Command::LpcList => {
+            lpc_list()?;
+            println!("ok");
+        }
+        Command::LpcReadNand { out, start, count } => {
+            let elapsed = lpc_read_nand(out, start, count)?;
+            println!("ok ({:.3}s)", elapsed.as_secs_f64());
+        }
+        Command::LpcWriteNand { input, start } => {
+            lpc_write_nand(input, start)?;
             println!("ok");
         }
         Command::FtdiReadNand {
@@ -543,6 +560,18 @@ fn demon_list() -> Result<()> {
         }
         Err(e) => {
             eprintln!("DemoN device not found: {e}");
+// LPC/XFlash functions
+
+fn lpc_list() -> Result<()> {
+    use crate::lpc::usb::UsbClient;
+
+    match UsbClient::open() {
+        Ok(_) => {
+            eprintln!("LPC/XFlash device found");
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("LPC/XFlash device not found: {e}");
             Ok(())
         }
     }
@@ -576,6 +605,38 @@ fn demon_info() -> Result<()> {
             nand_info.file_size(),
             nand_info.file_size()
         );
+fn lpc_info() -> Result<()> {
+    let mut client = LpcClient::open().context("Failed to open LPC/XFlash device")?;
+    client
+        .init()
+        .context("Failed to initialize LPC/XFlash device")?;
+
+    let version = client.version.unwrap_or(0);
+    eprintln!("LPC/XFlash Device Information:");
+    eprintln!("  ARM Version: {}", version);
+
+    match client.flash_init() {
+        Ok(config) => {
+            eprintln!("  Flash Config: 0x{:08X}", config.raw);
+            eprintln!("  Controller Type: {}", config.controller_type);
+            eprintln!("  Block Type: {}", config.block_type);
+            eprintln!("  Page Size: 0x{:X} bytes", config.page_size);
+            eprintln!("  Meta Size: 0x{:X} bytes", config.meta_size);
+            eprintln!("  Meta Type: {}", config.meta_type);
+            eprintln!("  Block Size: 0x{:X} bytes", config.block_size);
+            eprintln!("  Size Blocks: 0x{:X}", config.size_blocks);
+            eprintln!("  Size Small Blocks: 0x{:X}", config.size_small_blocks);
+            eprintln!("  File Blocks: 0x{:X}", config.file_blocks);
+            eprintln!(
+                "  Full File Size: 0x{:X} bytes ({} MB)",
+                config.file_size(),
+                config.file_size() / (1024 * 1024)
+            );
+            client.flash_deinit()?;
+        }
+        Err(e) => {
+            eprintln!("  Failed to initialize flash: {e}");
+        }
     }
 
     Ok(())
@@ -594,6 +655,21 @@ fn demon_read_nand(out: std::path::PathBuf, start: u32, count: Option<u32>) -> R
     let blocks_to_read = count.unwrap_or(total_blocks.saturating_sub(start));
 
     eprintln!("NAND: {} ({} MiB)", nand_info.name, nand_info.chip_size);
+fn lpc_read_nand(out: std::path::PathBuf, start: u32, count: Option<u32>) -> Result<Duration> {
+    let mut client = LpcClient::open().context("Failed to open LPC/XFlash device")?;
+    client
+        .init()
+        .context("Failed to initialize LPC/XFlash device")?;
+
+    let config_ver = client.version.unwrap_or(0);
+
+    let config = client.flash_init().context("Failed to initialize flash")?;
+    let total_blocks = config.size_small_blocks;
+    let block_size = 0x4200; // Fixed block size for LPC
+    let blocks_to_read = count.unwrap_or(total_blocks.saturating_sub(start));
+
+    eprintln!("LPC/XFlash: ARM Version {}", config_ver);
+    eprintln!("Flash Config: 0x{:08X}", config.raw);
     eprintln!(
         "Block size: {} bytes, Total blocks: {}",
         block_size, total_blocks
@@ -608,6 +684,10 @@ fn demon_read_nand(out: std::path::PathBuf, start: u32, count: Option<u32>) -> R
 
     for i in 0..blocks_to_read {
         let block_num = start + i;
+
+    for i in 0..blocks_to_read {
+        let block_num = start + i;
+
         if (i & 0x3F) == 0 {
             eprintln!("Reading block {}/{}", i + 1, blocks_to_read);
         }
@@ -618,6 +698,18 @@ fn demon_read_nand(out: std::path::PathBuf, start: u32, count: Option<u32>) -> R
         f.write_all(&block_buf).context("write output")?;
     }
 
+        let (status, data) = client
+            .flash_read(block_num)
+            .with_context(|| format!("read block {}", block_num))?;
+
+        if crate::lpc::status::is_error(status) {
+            bail!("Error reading block {}: status=0x{:X}", block_num, status);
+        }
+
+        f.write_all(&data).context("write output")?;
+    }
+
+    client.flash_deinit()?;
     f.flush().context("flush output")?;
     Ok(t0.elapsed())
 }
@@ -632,6 +724,17 @@ fn demon_write_nand(input: std::path::PathBuf, start: u32) -> Result<()> {
 
     let total_blocks = nand_info.num_blocks() as u32;
     let block_size = nand_info.total_block_size() as usize;
+fn lpc_write_nand(input: std::path::PathBuf, start: u32) -> Result<()> {
+    let mut client = LpcClient::open().context("Failed to open LPC/XFlash device")?;
+    client
+        .init()
+        .context("Failed to initialize LPC/XFlash device")?;
+
+    let config_ver = client.version.unwrap_or(0);
+
+    let config = client.flash_init().context("Failed to initialize flash")?;
+    let total_blocks = config.size_small_blocks;
+    let block_size = 0x4200u32; // Fixed block size for LPC
 
     let input_meta = std::fs::metadata(&input).context("stat input")?;
     let input_len = input_meta.len() as usize;
@@ -639,6 +742,9 @@ fn demon_write_nand(input: std::path::PathBuf, start: u32) -> Result<()> {
     if input_len % block_size != 0 {
         bail!(
             "input size must be a multiple of {} bytes (block size)",
+    if input_len % block_size as usize != 0 {
+        bail!(
+            "input size must be a multiple of {} bytes (LPC block size)",
             block_size
         );
     }
@@ -657,6 +763,26 @@ fn demon_write_nand(input: std::path::PathBuf, start: u32) -> Result<()> {
     }
 
     eprintln!("NAND: {} ({} MiB)", nand_info.name, nand_info.chip_size);
+    let file_blocks = (input_len / block_size as usize) as u32;
+
+    if start >= total_blocks {
+        bail!(
+            "start block {} out of range (total blocks {})",
+            start,
+            total_blocks
+        );
+    }
+    if start + file_blocks > total_blocks {
+        bail!(
+            "requested range {}..{} out of range (total blocks {})",
+            start,
+            start + file_blocks,
+            total_blocks
+        );
+    }
+
+    eprintln!("LPC/XFlash: ARM Version {}", config_ver);
+    eprintln!("Flash Config: 0x{:08X}", config.raw);
     eprintln!(
         "Block size: {} bytes, Writing {} blocks to {}",
         block_size, file_blocks, start
@@ -666,6 +792,7 @@ fn demon_write_nand(input: std::path::PathBuf, start: u32) -> Result<()> {
     let mut f = BufReader::with_capacity(1024 * 1024, f);
 
     let mut block_buf = vec![0u8; block_size];
+    let mut block_buf = vec![0u8; block_size as usize];
     for i in 0..file_blocks {
         let block_num = start + i;
 
@@ -674,10 +801,19 @@ fn demon_write_nand(input: std::path::PathBuf, start: u32) -> Result<()> {
             .write_block(block_num as u16, &block_buf)
             .with_context(|| format!("write block {}", block_num))?;
 
+        let status = client
+            .flash_write(block_num, &block_buf)
+            .with_context(|| format!("write block {}", block_num))?;
+
+        if crate::lpc::status::is_error(status) {
+            bail!("Error writing block {}: status=0x{:X}", block_num, status);
+        }
+
         if (i & 0x3F) == 0 {
             eprintln!("Written block {}/{}", i + 1, file_blocks);
         }
     }
 
+    client.flash_deinit()?;
     Ok(())
 }

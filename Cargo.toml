@@ -14,3 +14,4 @@ rusb = "0.9"
 eh0 = { package = "embedded-hal", version = "0.2.7", features = ["unproven"] }
 eh1 = { package = "embedded-hal", version = "1" }
 ehnb1 = { package = "embedded-hal-nb", version = "1" }
+rusb = "0.9"

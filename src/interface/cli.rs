@@ -121,4 +121,21 @@ pub enum Command {
 
     DemonInfo,
     DemonList,
+    // LPC/XFlash commands
+    LpcInfo,
+    LpcList,
+    LpcReadNand {
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, default_value_t = 0)]
+        start: u32,
+        #[arg(long)]
+        count: Option<u32>,
+    },
+    LpcWriteNand {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long, default_value_t = 0)]
+        start: u32,
+    },
 }
