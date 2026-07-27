@@ -1,6 +1,4 @@
 target
 release
-nand.bin
 Cargo.lock
-nanddump.bin
-updflash.bin
+*.bin
