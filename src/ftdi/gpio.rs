@@ -6,7 +6,7 @@ use hal::libftd2xx::{FtdiCommon as _, FtdiMpsse as _};
 use hal::ftdi_mpsse::{MpsseCmdExecutor, MpsseSettings};
 
 pub struct Device {
-	inner: libftd2xx::Ftdi,
+	pub inner: libftd2xx::Ftdi,
 }
 
 impl Device {

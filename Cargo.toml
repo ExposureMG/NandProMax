@@ -2,20 +2,17 @@
 name = "nandpromax"
 version = "0.0.1"
 edition = "2021"
+
 [lib]
-name = "libnandpromax"
-crate-type = ["cdylib"]
+name = "nandpromax"
+crate-type = ["cdylib", "staticlib"]
 
 [features]
 default = []
 libftdi = ["ftdi-embedded-hal/ftdi-libusb1-sys"]
 
-[dependencies.ftdi-embedded-hal]
-version = "0.24.0"
-optional = true
-features = ["libftd2xx", "libftd2xx-static"]
-
 [dependencies]
+ftdi-embedded-hal = { version = "0.24.0", features = ["libftd2xx", "libftd2xx-static"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serialport = "4"
@@ -23,4 +20,3 @@ rusb = "0.9"
 eh0 = { package = "embedded-hal", version = "0.2.7", features = ["unproven"] }
 eh1 = { package = "embedded-hal", version = "1" }
 ehnb1 = { package = "embedded-hal-nb", version = "1" }
-rusb = "0.9"
