@@ -600,6 +600,19 @@ pub fn xnand_clear_status(xspi: &mut XSpi) -> Result<()> {
 	Ok(())
 }
 
+pub fn xnand_erase_block(xspi: &mut XSpi, page_in_block: u32) -> Result<()> {
+	let cfg = xspi.read_u32(0x00)?;
+	xspi.write_u32(0x00, cfg | 0x08)?;
+
+	xnand_clear_status(xspi)?;
+	xspi.write_u32(0x0C, page_in_block << 9)?;
+	xspi.write_u32(0x08, 0xAA)?;
+	xspi.write_u32(0x08, 0x55)?;
+	xspi.write_u32(0x08, 0x05)?;
+	xspi.xnand_wait_ready_fast(0x1000).context("wait ready")?;
+	Ok(())
+}
+
 pub fn xnand_write_page_raw(xspi: &mut XSpi, page: u32, data: &[u8; 0x210]) -> Result<()> {
 	xspi.xnand_load_page_buffer(data)?;
 	xspi.xnand_write_execute(page)?;

@@ -1,0 +1,1 @@
+cargo run -- ftdi-write-nand --input updflash.bin

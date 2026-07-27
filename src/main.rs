@@ -12,6 +12,7 @@ use clap::Parser;
 
 use crate::demon::DemonClient;
 use crate::interface::cli::{Cli, Command};
+use crate::interface::cli::{Cli, Command, FtdiPageFormat};
 use crate::picoflasher::pfc::{
     Client, CMD_EMMC_DETECT, CMD_EMMC_GET_EXT_CSD, CMD_EMMC_INIT, CMD_EMMC_READ,
     CMD_EMMC_READ_STREAM, CMD_EMMC_WRITE, CMD_EMMC_WRITE_MULTI, CMD_GET_FLASH_CONFIG,
@@ -149,6 +150,215 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn ftdi_read_post_stream(
+	out: Option<std::path::PathBuf>,
+	count: Option<u64>,
+	ftdi_desc: &str,
+	ftdi_index: Option<i32>,
+	quiet: bool,
+	poll_us: u64,
+) -> Result<()> {
+	use crate::ftdi::gpio::Device;
+	use ftdi_embedded_hal::ftdi_mpsse::MpsseCmdExecutor as _;
+	use ftdi_embedded_hal::ftdi_mpsse::MpsseSettings;
+	use ftdi_embedded_hal::libftd2xx;
+	use ftdi_embedded_hal::libftd2xx::{FtdiCommon as _, FtdiMpsse as _};
+
+	let mut dev = if let Some(index) = ftdi_index {
+		Device::with_index(index).with_context(|| format!("ftdi-index={index}"))?
+	} else if ftdi_desc != "auto" {
+		Device::with_description(ftdi_desc)
+			.with_context(|| format!("open ftdi by description: {ftdi_desc:?}"))?
+	} else {
+		let devices = libftd2xx::list_devices().context("list ftdi devices")?;
+		let mut cands: Vec<libftd2xx::DeviceInfo> = devices
+			.into_iter()
+			.filter(|d| d.vendor_id == 0x0403 && d.product_id == 0x6010)
+			.collect();
+		if cands.is_empty() {
+			let num = libftd2xx::num_devices().context("query number of FTDI devices")?;
+			bail!("no FTDI 0403:6010 devices found (libftd2xx sees {num} device(s))");
+		}
+		cands.sort_by_key(|d| score_desc(&d.description));
+		let chosen = cands.first().unwrap();
+		Device::with_description(&chosen.description).with_context(|| {
+			format!(
+				"open FTDI by auto-selected description: {:?}",
+				chosen.description
+			)
+		})?
+	};
+
+	let settings = MpsseSettings {
+		latency_timer: Duration::from_millis(1),
+		in_transfer_size: 65536,
+		read_timeout: Duration::from_secs(5),
+		write_timeout: Duration::from_secs(5),
+		..Default::default()
+	};
+
+	dev.initialize_mpsse(&settings)
+		.map_err(|e| anyhow::anyhow!("init MPSSE failed: {e}"))?;
+
+	dev.set_timeouts(Duration::from_secs(5), Duration::from_secs(5))
+		.map_err(|e| anyhow::anyhow!("set timeouts failed: {e}"))?;
+
+	dev.send(&[0x85]).map_err(|e| anyhow::anyhow!("disable loopback: {e}"))?;
+	dev.send(&[0x80, 0x00, 0x00])
+		.map_err(|e| anyhow::anyhow!("set GPIO dir: {e}"))?;
+
+	let out_file = out
+		.map(|p| File::create(p).context("open output"))
+		.transpose()?;
+	let mut out_file = out_file.map(|f| BufWriter::with_capacity(1024 * 1024, f));
+
+	let stdout = std::io::stdout();
+	let mut stdout = stdout.lock();
+
+	let mut last = None::<u8>;
+	let mut read = 0u64;
+	let cmd = [0x81u8, 0x87u8];
+	let mut buf = [0u8; 1];
+
+	loop {
+		dev.send(&cmd)
+			.map_err(|e| anyhow::anyhow!("mpsse send (read gpio): {e}"))?;
+		dev.recv(&mut buf)
+			.map_err(|e| anyhow::anyhow!("mpsse recv (read gpio): {e}"))?;
+
+		let v = buf[0];
+		if last != Some(v) {
+			last = Some(v);
+			if let Some(f) = out_file.as_mut() {
+				f.write_all(&[v]).context("write output")?;
+			}
+			if !quiet {
+				writeln!(stdout, "{v:02X}").context("write stdout")?;
+			}
+			read += 1;
+			if let Some(max) = count {
+				if read >= max {
+					break;
+				}
+			}
+		}
+
+		if poll_us > 0 {
+			std::thread::sleep(Duration::from_micros(poll_us));
+		}
+	}
+
+	if let Some(mut f) = out_file {
+		f.flush().context("flush output")?;
+	}
+	Ok(())
+}
+
+fn score_desc(desc: &str) -> (u8, String) {
+	let d = desc.to_lowercase();
+	let prefer_b = if d.ends_with(" b") || d.contains(" b ") {
+		0
+	} else {
+		1
+	};
+	let prefer_a = if d.ends_with(" a") || d.contains(" a ") {
+		0
+	} else {
+		1
+	};
+	(prefer_b, format!("{prefer_a}:{d}"))
+}
+
+fn list_serial_ports() -> Result<()> {
+	let ports = serialport::available_ports().context("list serial ports")?;
+	for (i, p) in ports.into_iter().enumerate() {
+		eprint!("[{i}] {}", p.port_name);
+		match p.port_type {
+			serialport::SerialPortType::UsbPort(info) => {
+				eprint!(
+					" usb vid=0x{:04x} pid=0x{:04x}",
+					info.vid, info.pid
+				);
+				if let Some(s) = info.serial_number {
+					eprint!(" serial={s}");
+				}
+				if let Some(s) = info.manufacturer {
+					eprint!(" mfg={s}");
+				}
+				if let Some(s) = info.product {
+					eprint!(" product={s}");
+				}
+			}
+			serialport::SerialPortType::PciPort => eprint!(" pci"),
+			serialport::SerialPortType::BluetoothPort => eprint!(" bt"),
+			serialport::SerialPortType::Unknown => {}
+		}
+		eprintln!();
+	}
+	Ok(())
+}
+
+fn read_post_stream(
+	port: &str,
+	baud: u32,
+	timeout: Duration,
+	out: Option<std::path::PathBuf>,
+	count: Option<u64>,
+	quiet: bool,
+) -> Result<()> {
+	let mut port = serialport::new(port, baud)
+		.timeout(timeout)
+		.open()
+		.with_context(|| format!("open serial port {port}"))?;
+
+	if let Err(e) = port.write_data_terminal_ready(true) {
+		eprintln!("warning: failed to set DTR: {e}");
+	}
+	if let Err(e) = port.write_request_to_send(true) {
+		eprintln!("warning: failed to set RTS: {e}");
+	}
+
+	eprintln!("listening for POST codes on {}/{}...", port.name().unwrap_or_else(|| "?".into()), baud);
+
+	let out_file = out
+		.map(|p| File::create(p).context("open output"))
+		.transpose()?;
+	let mut out_file = out_file.map(|f| BufWriter::with_capacity(1024 * 1024, f));
+
+	let stdout = std::io::stdout();
+	let mut stdout = stdout.lock();
+
+	let mut buf = [0u8; 1];
+	let mut read = 0u64;
+	loop {
+		match port.read_exact(&mut buf) {
+			Ok(()) => {}
+			Err(e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
+			Err(e) => return Err(e).with_context(|| "read serial"),
+		}
+
+		let b = buf[0];
+		if let Some(f) = out_file.as_mut() {
+			f.write_all(&[b]).context("write output")?;
+		}
+		if !quiet {
+			writeln!(stdout, "{b:02X}").context("write stdout")?;
+		}
+
+		read += 1;
+		if let Some(max) = count {
+			if read >= max {
+				break;
+			}
+		}
+	}
+
+	if let Some(mut f) = out_file {
+		f.flush().context("flush output")?;
+	}
+	Ok(())
+}
+
 fn ftdi_read_nand(
     out: std::path::PathBuf,
     start: u32,
@@ -163,103 +373,198 @@ fn ftdi_read_nand(
     let mut xspi = XSpi::open(ftdi_desc, ftdi_index, freq_hz)?;
     xspi.enter_flash_mode()?;
 
-    let flash_config = xspi.read_u32(0x00)?;
-    let geom = sfc_init(flash_config)?;
-    let total_pages = geom.pages_count_in_nand;
-    let pages = count.unwrap_or(total_pages.saturating_sub(start));
+	let flash_config = xspi.read_u32(0x00)?;
+	let geom = sfc_init(flash_config)?;
+	let total_small_pages = geom.pages_count_in_nand;
 
-    eprintln!(
-        "flash_config=0x{flash_config:08x} nand={}MB start={} pages={}",
-        geom.nand_size_mb, start, pages
-    );
+	let use_big_pages = match page_format {
+		FtdiPageFormat::Auto => geom.large_block != 0,
+		FtdiPageFormat::Small => false,
+		FtdiPageFormat::Big => true,
+	};
+
+	let (start_small, pages_small, unit_name) = if use_big_pages {
+		if total_small_pages % 4 != 0 {
+			bail!("NAND page count not divisible by 4; cannot use big-page format");
+		}
+		let total_big_pages = total_small_pages / 4;
+		let pages_big = count.unwrap_or(total_big_pages.saturating_sub(start));
+		(start * 4, pages_big * 4, "big (0x840)")
+	} else {
+		let pages = count.unwrap_or(total_small_pages.saturating_sub(start));
+		(start, pages, "small (0x210)")
+	};
+
+	eprintln!(
+		"flash_config=0x{flash_config:08x} nand={}MB page_format={} start={} count={}",
+		geom.nand_size_mb, unit_name, start, pages_small / if use_big_pages { 4 } else { 1 }
+	);
 
     let f = File::create(out).context("open output")?;
     let mut f = BufWriter::with_capacity(1024 * 1024, f);
 
-    let t0 = Instant::now();
-    let mut page_buf = [0u8; 0x210];
-    for i in 0..pages {
-        if (i & 0xFF) == 0 {
-            xnand_clear_status(&mut xspi).context("clear status")?;
-        }
-        let page = start + i;
-        xnand_read_page_raw(&mut xspi, page, &mut page_buf)
-            .with_context(|| format!("read page {page}"))?;
-        f.write_all(&page_buf)?;
+	let t0 = Instant::now();
+	let mut page_buf = [0u8; 0x210];
+	let mut big_buf = vec![0u8; 0x840];
+	for i in 0..pages_small {
+		if (i & 0xFF) == 0 {
+			xnand_clear_status(&mut xspi).context("clear status")?;
+		}
 
-        if (i & 0xFF) == 0 {
-            eprintln!("read {}/{} pages", i + 1, pages);
-        }
-    }
+		let page = start_small + i;
+		xnand_read_page_raw(&mut xspi, page, &mut page_buf)
+			.with_context(|| format!("read page {page}"))?;
+
+		if use_big_pages {
+			let idx = (i as usize % 4) * 0x210;
+			big_buf[idx..idx + 0x210].copy_from_slice(&page_buf);
+			if (i & 3) == 3 {
+				f.write_all(&big_buf)?;
+			}
+		} else {
+			f.write_all(&page_buf)?;
+		}
+
+		if (i & 0x3FF) == 0 {
+			let done = i + 1;
+			let total = pages_small;
+			eprintln!("read {done}/{total} pages");
+		}
+	}
 
     f.flush().context("flush output")?;
     Ok(t0.elapsed())
 }
 
 fn ftdi_write_nand(
-    input: std::path::PathBuf,
-    start: u32,
-    count: Option<u32>,
-    ftdi_desc: &str,
-    ftdi_index: Option<i32>,
-    freq_hz: u32,
+	input: std::path::PathBuf,
+	start: u32,
+	count: Option<u32>,
+	page_format: FtdiPageFormat,
+	ftdi_desc: &str,
+	ftdi_index: Option<i32>,
+	freq_hz: u32,
+	erase: bool,
+	verify: bool,
 ) -> Result<Duration> {
-    use crate::ftdi::spi::{sfc_init, xnand_clear_status, xnand_write_page_raw, XSpi};
+	use crate::ftdi::spi::{
+		sfc_init, xnand_clear_status, xnand_erase_block, xnand_read_page_raw, xnand_write_page_raw, XSpi,
+	};
 
-    let input_meta = std::fs::metadata(&input).context("stat input")?;
-    let input_len = input_meta.len() as usize;
-    if input_len % 0x210 != 0 {
-        bail!("input size must be a multiple of 0x210 bytes (raw page size)");
-    }
-
-    let file_pages = (input_len / 0x210) as u32;
-    let pages = count.unwrap_or(file_pages);
-    if pages > file_pages {
-        bail!("input has {file_pages} pages but --count={pages} requested");
-    }
+	let input_meta = std::fs::metadata(&input).context("stat input")?;
+	let input_len = input_meta.len() as usize;
 
     eprintln!("ftdi freq_hz={freq_hz}");
     let mut xspi = XSpi::open(ftdi_desc, ftdi_index, freq_hz)?;
     xspi.enter_flash_mode()?;
 
-    let flash_config = xspi.read_u32(0x00)?;
-    let geom = sfc_init(flash_config)?;
-    let total_pages = geom.pages_count_in_nand;
-    if start >= total_pages {
-        bail!("start page {start} out of range (total pages {total_pages})");
-    }
-    if start + pages > total_pages {
-        bail!(
-            "requested range {}..{} out of range (total pages {total_pages})",
-            start,
-            start + pages
-        );
-    }
+	let flash_config = xspi.read_u32(0x00)?;
+	let geom = sfc_init(flash_config)?;
+	let total_small_pages = geom.pages_count_in_nand;
 
-    eprintln!(
-        "flash_config=0x{flash_config:08x} nand={}MB start={} pages={} (input_pages={file_pages})",
-        geom.nand_size_mb, start, pages
-    );
+	let use_big_pages = match page_format {
+		FtdiPageFormat::Auto => geom.large_block != 0,
+		FtdiPageFormat::Small => false,
+		FtdiPageFormat::Big => true,
+	};
+
+	let (input_page_bytes, unit_name) = if use_big_pages {
+		(0x840usize, "big (0x840)")
+	} else {
+		(0x210usize, "small (0x210)")
+	};
+
+	if input_len % input_page_bytes != 0 {
+		bail!("input size must be a multiple of 0x{input_page_bytes:x} bytes");
+	}
+
+	let file_pages = (input_len / input_page_bytes) as u32;
+	let pages = count.unwrap_or(file_pages);
+	if pages > file_pages {
+		bail!("input has {file_pages} pages but --count={pages} requested");
+	}
+
+	let (start_small, pages_small) = if use_big_pages {
+		if total_small_pages % 4 != 0 {
+			bail!("NAND page count not divisible by 4; cannot use big-page format");
+		}
+		(start * 4, pages * 4)
+	} else {
+		(start, pages)
+	};
+
+	if start_small >= total_small_pages {
+		bail!("start page {start} out of range");
+	}
+	if start_small + pages_small > total_small_pages {
+		bail!(
+			"requested range {}..{} out of range",
+			start_small,
+			start_small + pages_small
+		);
+	}
+
+	eprintln!(
+		"flash_config=0x{flash_config:08x} nand={}MB page_format={} start={} pages={} erase={} verify={} (input_pages={file_pages})",
+		geom.nand_size_mb, unit_name, start, pages, erase, verify
+	);
 
     let f = File::open(input).context("open input")?;
     let mut f = BufReader::with_capacity(1024 * 1024, f);
 
-    let t0 = Instant::now();
-    let mut page_buf = [0u8; 0x210];
-    for i in 0..pages {
-        if (i & 0xFF) == 0 {
-            xnand_clear_status(&mut xspi).context("clear status")?;
-        }
+	let t0 = Instant::now();
+	let mut page_buf = [0u8; 0x210];
+	let mut big_buf = vec![0u8; 0x840];
+	for i in 0..pages_small {
+		if (i & 0xFF) == 0 {
+			xnand_clear_status(&mut xspi).context("clear status")?;
+		}
 
-        f.read_exact(&mut page_buf).context("read input page")?;
-        let page = start + i;
-        xnand_write_page_raw(&mut xspi, page, &page_buf)
-            .with_context(|| format!("write page {page}"))?;
+		if use_big_pages {
+			if (i & 3) == 0 {
+				f.read_exact(&mut big_buf).context("read input page")?;
+			}
+			let idx = (i as usize % 4) * 0x210;
+			page_buf.copy_from_slice(&big_buf[idx..idx + 0x210]);
+		} else {
+			f.read_exact(&mut page_buf).context("read input page")?;
+		}
 
-        if (i & 0xFF) == 0 {
-            eprintln!("wrote {}/{} pages", i + 1, pages);
-        }
-    }
+		let page = start_small + i;
+		if erase && (page % geom.page_count_in_block) == 0 {
+			xnand_erase_block(&mut xspi, page).with_context(|| format!("erase block at page {page}"))?;
+		}
+		xnand_write_page_raw(&mut xspi, page, &page_buf)
+			.with_context(|| format!("write page {page}"))?;
+
+		if verify {
+			let mut verify_buf = [0u8; 0x210];
+			xnand_read_page_raw(&mut xspi, page, &mut verify_buf)
+				.with_context(|| format!("verify read page {page}"))?;
+			if verify_buf != page_buf {
+				let mut first = None;
+				for (idx, (a, b)) in page_buf.iter().zip(verify_buf.iter()).enumerate() {
+					if a != b {
+						first = Some((idx, *a, *b));
+						break;
+					}
+				}
+				if let Some((idx, exp, got)) = first {
+					bail!(
+						"verify failed at page {page} (first mismatch at +0x{idx:x}: expected 0x{exp:02x}, got 0x{got:02x})"
+					);
+				} else {
+					bail!("verify failed at page {page} (data mismatch)");
+				}
+			}
+		}
+
+		if (i & 0x3FF) == 0 {
+			let done = i + 1;
+			let total = pages_small;
+			eprintln!("wrote {done}/{total} pages");
+		}
+	}
 
     Ok(t0.elapsed())
 }

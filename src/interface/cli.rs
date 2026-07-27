@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser, Debug)]
 #[command(name = "picoclient")]
@@ -19,11 +19,34 @@ pub struct Cli {
     pub command: Command,
 }
 
+#[derive(ValueEnum, Debug, Clone, Copy)]
+pub enum FtdiPageFormat {
+	Auto,
+	Small,
+	Big,
+}
+
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    ReadNand {
-        #[arg(long)]
-        out: PathBuf,
+	ListSerial,
+
+	ReadPost {
+		#[arg(long)]
+		out: Option<PathBuf>,
+
+		#[arg(long)]
+		count: Option<u64>,
+
+		#[arg(long, default_value_t = 115200)]
+		baud: u32,
+
+		#[arg(long)]
+		quiet: bool,
+	},
+
+	ReadNand {
+		#[arg(long)]
+		out: PathBuf,
 
         #[arg(long, default_value_t = 0)]
         start: u32,
@@ -69,8 +92,11 @@ pub enum Command {
         #[arg(long)]
         count: Option<u32>,
 
-        #[arg(long, default_value = "auto")]
-        ftdi_desc: String,
+		#[arg(long, value_enum, default_value_t = FtdiPageFormat::Auto)]
+		page_format: FtdiPageFormat,
+
+		#[arg(long, default_value = "auto")]
+		ftdi_desc: String,
 
         #[arg(long)]
         ftdi_index: Option<i32>,
@@ -89,15 +115,44 @@ pub enum Command {
         #[arg(long)]
         count: Option<u32>,
 
-        #[arg(long, default_value = "auto")]
-        ftdi_desc: String,
+		#[arg(long, value_enum, default_value_t = FtdiPageFormat::Auto)]
+		page_format: FtdiPageFormat,
+
+		#[arg(long, default_value = "auto")]
+		ftdi_desc: String,
 
         #[arg(long)]
         ftdi_index: Option<i32>,
 
-        #[arg(long, default_value_t = 30_000_000)]
-        freq_hz: u32,
-    },
+		#[arg(long, default_value_t = 30_000_000)]
+		freq_hz: u32,
+
+		#[arg(long, action = ArgAction::Set, default_value_t = true)]
+		erase: bool,
+
+		#[arg(long)]
+		verify: bool,
+	},
+
+	FtdiReadPost {
+		#[arg(long)]
+		out: Option<PathBuf>,
+
+		#[arg(long)]
+		count: Option<u64>,
+
+		#[arg(long, default_value = "auto")]
+		ftdi_desc: String,
+
+		#[arg(long)]
+		ftdi_index: Option<i32>,
+
+		#[arg(long)]
+		quiet: bool,
+
+		#[arg(long, default_value_t = 1000)]
+		poll_us: u64,
+	},
 
     FtdiList,
     DemonReadNand {
