@@ -13,9 +13,8 @@ Cross-platform Xbox 360 NAND/eMMC flasher tool.
 
 **Planned**
 
-- UpdServer (Via UpdClient)
 - DirtyJTAG / CMSIS-DAP v2
-
+- JR-Programmer Timing and ISD
 
 ## Credits
 

@@ -13,10 +13,11 @@ mod interface;
 mod lpc;
 mod picoflasher;
 mod tcp;
+mod types;
 
 use crate::demon::DemonClient;
 use crate::flasher::{run_read_nand, run_write_nand, NandFlasher};
-use crate::interface::cli::{AdapterType, DeviceType, FtdiPageFormat, MediaType};
+use crate::types::{AdapterType, DeviceType, FtdiPageFormat, MediaType};
 use crate::lpc::LpcClient;
 use crate::picoflasher::pfc::{
     Client, CMD_EMMC_DETECT, CMD_EMMC_GET_EXT_CSD, CMD_EMMC_INIT, CMD_EMMC_READ,
@@ -86,7 +87,7 @@ pub unsafe extern "C" fn nandpromax_read_nand_c(
     let count_opt = if count_has_val { Some(count) } else { None };
 
     let dev_opt = match device {
-        NandProDeviceC::Picoflasher => Some(DeviceType::Picoflasher),
+        NandProDeviceC::Picoflasher => Some(DeviceType::Pico),
         NandProDeviceC::Ftdi => Some(DeviceType::Ftdi),
         NandProDeviceC::Lpc => Some(DeviceType::Lpc),
         NandProDeviceC::Demon => Some(DeviceType::Demon),
@@ -150,7 +151,7 @@ pub unsafe extern "C" fn nandpromax_write_nand_c(
     let count_opt = if count_has_val { Some(count) } else { None };
 
     let dev_opt = match device {
-        NandProDeviceC::Picoflasher => Some(DeviceType::Picoflasher),
+        NandProDeviceC::Picoflasher => Some(DeviceType::Pico),
         NandProDeviceC::Ftdi => Some(DeviceType::Ftdi),
         NandProDeviceC::Lpc => Some(DeviceType::Lpc),
         NandProDeviceC::Demon => Some(DeviceType::Demon),
@@ -248,13 +249,13 @@ fn unified_read_nand_impl(
     media: Option<MediaType>,
     ep: Option<&str>,
 ) -> Result<Duration> {
-    let dev = device.unwrap_or(DeviceType::Picoflasher);
+    let dev = device.unwrap_or(DeviceType::Pico);
     let ad = adapter.unwrap_or(AdapterType::Usb);
     let med = media.unwrap_or(MediaType::Spi);
 
     let t0 = Instant::now();
     match (dev, med) {
-        (DeviceType::Picoflasher, MediaType::Spi) => {
+        (DeviceType::Pico, MediaType::Spi) => {
             let timeout = Duration::from_secs(3);
             let (mut client, _) = if ad == AdapterType::Tcp {
                 Client::connect_tcp(ep.unwrap_or("192.168.4.1:3232"), timeout)?
@@ -265,7 +266,7 @@ fn unified_read_nand_impl(
             let blocks = count.unwrap_or(blocks_total.saturating_sub(start));
             read_nand_pfc(&mut client, out, start, blocks)?;
         }
-        (DeviceType::Picoflasher, MediaType::Emmc) => {
+        (DeviceType::Pico, MediaType::Emmc) => {
             let timeout = Duration::from_secs(3);
             let (mut client, _) = if ad == AdapterType::Tcp {
                 Client::connect_tcp(ep.unwrap_or("192.168.4.1:3232"), timeout)?
@@ -298,6 +299,8 @@ fn unified_read_nand_impl(
             let mut client = DemonClient::open().context("Failed to open DemoN device")?;
             run_read_nand(&mut client, out, start, count)?;
         }
+        (DeviceType::Jrp, _) => bail!("JR-Programmer not yet supported in FFI"),
+        (DeviceType::Esp, _) => bail!("Use Pico+Tcp for ESPFlasher in FFI"),
     }
     Ok(t0.elapsed())
 }
@@ -313,13 +316,13 @@ fn unified_write_nand_impl(
     _erase: bool,
     _verify: bool,
 ) -> Result<Duration> {
-    let dev = device.unwrap_or(DeviceType::Picoflasher);
+    let dev = device.unwrap_or(DeviceType::Pico);
     let ad = adapter.unwrap_or(AdapterType::Usb);
     let med = media.unwrap_or(MediaType::Spi);
 
     let t0 = Instant::now();
     match (dev, med) {
-        (DeviceType::Picoflasher, MediaType::Spi) => {
+        (DeviceType::Pico, MediaType::Spi) => {
             let timeout = Duration::from_secs(3);
             let (mut client, _) = if ad == AdapterType::Tcp {
                 Client::connect_tcp(ep.unwrap_or("192.168.4.1:3232"), timeout)?
@@ -329,7 +332,7 @@ fn unified_write_nand_impl(
             let _ = prepare_nand_pfc(&mut client)?;
             write_nand_pfc(&mut client, input, start)?;
         }
-        (DeviceType::Picoflasher, MediaType::Emmc) => {
+        (DeviceType::Pico, MediaType::Emmc) => {
             let timeout = Duration::from_secs(3);
             let (mut client, _) = if ad == AdapterType::Tcp {
                 Client::connect_tcp(ep.unwrap_or("192.168.4.1:3232"), timeout)?
@@ -350,6 +353,8 @@ fn unified_write_nand_impl(
             let mut client = DemonClient::open().context("Failed to open DemoN device")?;
             run_write_nand(&mut client, input, start)?;
         }
+        (DeviceType::Jrp, _) => bail!("JR-Programmer not yet supported in FFI"),
+        (DeviceType::Esp, _) => bail!("Use Pico+Tcp for ESPFlasher in FFI"),
     }
     Ok(t0.elapsed())
 }
