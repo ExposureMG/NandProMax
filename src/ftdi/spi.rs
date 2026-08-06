@@ -277,16 +277,18 @@ impl XSpi {
 			}
 		}
 
-		let per_word_bytes = 3 + (3 + w0.len()) + 3 + 3 + (3 + r0.len()) + 3 + 3;
-		cmd.reserve(words * per_word_bytes);
+		let mut word_cmd = Vec::with_capacity(28);
+		Self::cmd_set_gpio_lower(&mut word_cmd, cs_lo, dir);
+		Self::cmd_clock_data_out(&mut word_cmd, clk_out, &w0);
+		Self::cmd_set_gpio_lower(&mut word_cmd, cs_hi, dir);
+		Self::cmd_set_gpio_lower(&mut word_cmd, cs_lo, dir);
+		Self::cmd_clock_data_out(&mut word_cmd, clk_out, &r0);
+		Self::cmd_clock_data_in(&mut word_cmd, clk_in, 4);
+		Self::cmd_set_gpio_lower(&mut word_cmd, cs_hi, dir);
+
+		cmd.reserve(words * word_cmd.len());
 		for _ in 0..words {
-			Self::cmd_set_gpio_lower(cmd, cs_lo, dir);
-			Self::cmd_clock_data_out(cmd, clk_out, &w0);
-			Self::cmd_set_gpio_lower(cmd, cs_hi, dir);
-			Self::cmd_set_gpio_lower(cmd, cs_lo, dir);
-			Self::cmd_clock_data_out(cmd, clk_out, &r0);
-			Self::cmd_clock_data_in(cmd, clk_in, 4);
-			Self::cmd_set_gpio_lower(cmd, cs_hi, dir);
+			cmd.extend_from_slice(&word_cmd);
 		}
 		Ok(())
 	}
@@ -301,8 +303,8 @@ impl XSpi {
 			}
 		}
 
-		const BATCH: usize = 256;
-		let mut rx = vec![0u8; BATCH * tx.len()];
+		const BATCH: usize = 1;
+		let mut rx = [0u8; BATCH * 3];
 		let per_poll_bytes = 3 + (3 + tx.len()) + 3;
 		let mut cmd = Vec::with_capacity(BATCH * per_poll_bytes + 1);
 		while timeout > 0 {
@@ -337,6 +339,7 @@ impl XSpi {
 		bail!("timeout waiting for NAND ready");
 	}
 
+	#[allow(dead_code)]
 	fn xnand_start_page_read(&mut self, page: u32) -> Result<()> {
 		let mut cmd = Vec::with_capacity(128);
 		self.append_write_u32_cmd(&mut cmd, 0x0C, page << 9);
@@ -351,6 +354,7 @@ impl XSpi {
 		Ok(())
 	}
 
+	#[allow(dead_code)]
 	fn xnand_finish_page_read(&mut self, out: &mut [u8; 0x210]) -> Result<()> {
 		let mut cmd = Vec::with_capacity(16384);
 		self.append_write_u32_cmd(&mut cmd, 0x0C, 0);
@@ -372,6 +376,7 @@ impl XSpi {
 		Ok(())
 	}
 
+	#[allow(dead_code)]
 	fn xnand_load_page_buffer(&mut self, data: &[u8; 0x210]) -> Result<()> {
 		let mut cmd = Vec::with_capacity(8192);
 		self.append_write_u32_cmd(&mut cmd, 0x0C, 0);
@@ -390,6 +395,7 @@ impl XSpi {
 		Ok(())
 	}
 
+	#[allow(dead_code)]
 	fn xnand_write_execute(&mut self, page: u32) -> Result<()> {
 		let mut cmd = Vec::with_capacity(256);
 		self.append_write_u32_cmd(&mut cmd, 0x0C, page << 9);
@@ -587,6 +593,12 @@ pub fn sfc_init(flash_config: u32) -> Result<SfcGeometry> {
 	})
 }
 
+pub const NAND_READ_BATCH_PAGES: usize = 32;
+pub const NAND_READ_DELAY_BYTES: usize = 375;
+pub const NAND_WRITE_DELAY_BYTES: usize = 937;
+pub const NAND_ERASE_DELAY_BYTES: usize = 6000;
+
+#[allow(dead_code)]
 pub fn xnand_read_page_raw(xspi: &mut XSpi, page: u32, out: &mut [u8; 0x210]) -> Result<()> {
 	xspi.xnand_start_page_read(page)?;
 	xspi.xnand_wait_ready_fast(0x1000).context("wait ready")?;
@@ -594,28 +606,144 @@ pub fn xnand_read_page_raw(xspi: &mut XSpi, page: u32, out: &mut [u8; 0x210]) ->
 	Ok(())
 }
 
-pub fn xnand_clear_status(xspi: &mut XSpi) -> Result<()> {
-	let st = xspi.read_u32(0x04)?;
-	xspi.write_u32(0x04, st)?;
+pub fn xnand_read_batch(xspi: &mut XSpi, start_page: u32, n_pages: usize, out: &mut [u8]) -> Result<()> {
+	if n_pages == 0 {
+		return Ok(());
+	}
+	let expected_len = n_pages
+		.checked_mul(0x210)
+		.ok_or_else(|| anyhow!("invalid batch size"))?;
+	if out.len() < expected_len {
+		bail!(
+			"out buffer too small for batch read: got {}, expected {}",
+			out.len(),
+			expected_len
+		);
+	}
+
+	let per_page_bytes = 12 + 12 + (3 + NAND_READ_DELAY_BYTES) + 12 + (132 * 26);
+	let mut cmd = Vec::with_capacity(n_pages * per_page_bytes + 1);
+
+	let zeros = vec![0u8; NAND_READ_DELAY_BYTES];
+	let (clk_out, _, _) = xspi.mpsse_clock_modes();
+
+	for p in 0..n_pages {
+		let page = start_page + (p as u32);
+		xspi.append_write_u32_cmd(&mut cmd, 0x0C, page << 9);
+		xspi.append_write_u32_cmd(&mut cmd, 0x08, 0x03);
+		XSpi::cmd_clock_data_out(&mut cmd, clk_out, &zeros);
+		xspi.append_write_u32_cmd(&mut cmd, 0x0C, 0);
+		xspi.append_read_data_words_fast_cmd(&mut cmd, 0x84)?;
+	}
+	XSpi::cmd_send_immediate(&mut cmd);
+
+	let recv_buf = &mut out[..expected_len];
+	xspi.hal.with_device(|d| -> Result<()> {
+		d.send(&cmd).context("mpsse send batch")?;
+		d.recv(recv_buf).context("mpsse recv batch")?;
+		Ok(())
+	})?;
+
+	if xspi.bit_reverse {
+		for b in recv_buf.iter_mut() {
+			*b = b.reverse_bits();
+		}
+	}
+
 	Ok(())
 }
 
-pub fn xnand_erase_block(xspi: &mut XSpi, page_in_block: u32) -> Result<()> {
-	let cfg = xspi.read_u32(0x00)?;
-	xspi.write_u32(0x00, cfg | 0x08)?;
+pub fn xnand_clear_status(xspi: &mut XSpi) -> Result<()> {
+	xspi.write_u32(0x04, 0x02)?;
+	Ok(())
+}
 
+pub fn xnand_erase_block(xspi: &mut XSpi, flash_config: u32, page_in_block: u32) -> Result<()> {
+	xspi.write_u32(0x00, flash_config | 0x08)?;
 	xnand_clear_status(xspi)?;
-	xspi.write_u32(0x0C, page_in_block << 9)?;
-	xspi.write_u32(0x08, 0xAA)?;
-	xspi.write_u32(0x08, 0x55)?;
-	xspi.write_u32(0x08, 0x05)?;
+
+	let zeros = vec![0u8; NAND_ERASE_DELAY_BYTES];
+	let (clk_out, _, _) = xspi.mpsse_clock_modes();
+
+	let mut cmd = Vec::with_capacity(128 + NAND_ERASE_DELAY_BYTES);
+	xspi.append_write_u32_cmd(&mut cmd, 0x0C, page_in_block << 9);
+	xspi.append_write_u32_cmd(&mut cmd, 0x08, 0xAA);
+	xspi.append_write_u32_cmd(&mut cmd, 0x08, 0x55);
+	xspi.append_write_u32_cmd(&mut cmd, 0x08, 0x05);
+	XSpi::cmd_clock_data_out(&mut cmd, clk_out, &zeros);
+	XSpi::cmd_send_immediate(&mut cmd);
+
+	xspi.hal.with_device(|d| -> Result<()> {
+		d.send(&cmd).context("mpsse send erase block")?;
+		Ok(())
+	})?;
+
 	xspi.xnand_wait_ready_fast(0x1000).context("wait ready")?;
 	Ok(())
 }
 
 pub fn xnand_write_page_raw(xspi: &mut XSpi, page: u32, data: &[u8; 0x210]) -> Result<()> {
-	xspi.xnand_load_page_buffer(data)?;
-	xspi.xnand_write_execute(page)?;
+	let (dir, cs_lo, cs_hi) = xspi.mpsse_gpio_consts();
+	let (clk_out, _, _) = xspi.mpsse_clock_modes();
+
+	let zeros = vec![0u8; NAND_WRITE_DELAY_BYTES];
+	let mut cmd = Vec::with_capacity(4096 + NAND_WRITE_DELAY_BYTES);
+
+	// 1. Reset page buffer index to 0
+	xspi.append_write_u32_cmd(&mut cmd, 0x0C, 0);
+
+	// 2. Pre-assemble 0x08 register advance command (reg 0x08 = 0x01)
+	let mut w08_buf = [(0x08u8 << 2) | 2, 1, 0, 0, 0];
+	if xspi.bit_reverse {
+		for b in &mut w08_buf {
+			*b = b.reverse_bits();
+		}
+	}
+	let mut w08_cmd = Vec::with_capacity(12);
+	XSpi::cmd_set_gpio_lower(&mut w08_cmd, cs_lo, dir);
+	XSpi::cmd_clock_data_out(&mut w08_cmd, clk_out, &w08_buf);
+	XSpi::cmd_set_gpio_lower(&mut w08_cmd, cs_hi, dir);
+
+	// 3. Fast load 132 words into page buffer
+	let clk_out_op: u8 = clk_out.into();
+	let mut w10_hdr = [0x80, cs_lo, dir, clk_out_op, 4, 0, (0x10u8 << 2) | 2];
+	if xspi.bit_reverse {
+		w10_hdr[6] = w10_hdr[6].reverse_bits();
+	}
+	let w10_tail = [0x80, cs_hi, dir];
+
+	for chunk in data.chunks_exact(4) {
+		let mut w_bytes = [chunk[0], chunk[1], chunk[2], chunk[3]];
+		if xspi.bit_reverse {
+			for b in &mut w_bytes {
+				*b = b.reverse_bits();
+			}
+		}
+		cmd.extend_from_slice(&w10_hdr);
+		cmd.extend_from_slice(&w_bytes);
+		cmd.extend_from_slice(&w10_tail);
+		cmd.extend_from_slice(&w08_cmd);
+	}
+
+	// 4. Start write execution on page
+	xspi.append_write_u32_cmd(&mut cmd, 0x0C, page << 9);
+	xspi.append_write_u32_cmd(&mut cmd, 0x08, 0x55);
+	xspi.append_write_u32_cmd(&mut cmd, 0x08, 0xAA);
+	xspi.append_write_u32_cmd(&mut cmd, 0x08, 0x04);
+
+	// 5. In-stream hardware delay during physical cell program time (tPROG)
+	XSpi::cmd_clock_data_out(&mut cmd, clk_out, &zeros);
+
+	XSpi::cmd_send_immediate(&mut cmd);
+
+	// 6. Send single USB write packet for load + write execution + in-stream delay
+	xspi.hal.with_device(|d| -> Result<()> {
+		d.send(&cmd).context("mpsse send write page")?;
+		Ok(())
+	})?;
+
+	// 7. Instant status check to confirm ready
+	xspi.xnand_wait_ready_fast(0x1000).context("wait ready")?;
 	Ok(())
 }
 

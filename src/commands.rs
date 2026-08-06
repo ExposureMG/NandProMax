@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -109,6 +109,7 @@ pub fn cmd_read_nand(
     };
 
     println!("ok ({:.3}s)", elapsed.as_secs_f64());
+    plog!(progress, "Operation completed in {:.2}s", elapsed.as_secs_f64());
     Ok(())
 }
 
@@ -148,7 +149,7 @@ pub fn cmd_write_nand(
         target_dev, target_adapter, target_media
     );
 
-    match (target_dev, target_media) {
+    let elapsed = match (target_dev, target_media) {
         (DeviceType::Pico, MediaType::Spi) => {
             let (mut client, resolved) = if target_adapter == AdapterType::Tcp {
                 Client::connect_tcp(&addr, timeout)?
@@ -158,7 +159,9 @@ pub fn cmd_write_nand(
             };
             plog!(progress, "connected to {resolved}");
             let (_flash_config, _blocks_total) = prepare_nand(&mut client, progress)?;
+            let t0 = Instant::now();
             write_nand(&mut client, input, start, progress)?;
+            t0.elapsed()
         }
         (DeviceType::Pico, MediaType::Emmc) => {
             let (mut client, resolved) = if target_adapter == AdapterType::Tcp {
@@ -169,27 +172,34 @@ pub fn cmd_write_nand(
             };
             plog!(progress, "connected to {resolved}");
             let _blocks_total = prepare_emmc(&mut client, progress)?;
+            let t0 = Instant::now();
             write_emmc(&mut client, input, start, progress)?;
+            t0.elapsed()
         }
         (DeviceType::Ftdi, _) => {
             ftdi_write_nand(
                 input, start, count, page_format, &ftdi_desc, ftdi_index, freq_hz, erase, verify,
                 progress,
-            )?;
+            )?
         }
         (DeviceType::Lpc, _) => {
+            let t0 = Instant::now();
             let mut client = LpcClient::open().context("Failed to open LPC device")?;
             run_write_nand(&mut client, input, start)?;
+            t0.elapsed()
         }
         (DeviceType::Demon, _) => {
+            let t0 = Instant::now();
             let mut client = DemonClient::open().context("Failed to open DemoN device")?;
             run_write_nand(&mut client, input, start)?;
+            t0.elapsed()
         }
         (DeviceType::Jrp, _) => bail!("JR-Programmer write not yet implemented"),
         (DeviceType::Esp, _) => unreachable!("Esp resolved to Pico+Tcp in auto_detect_device"),
-    }
+    };
 
-    println!("ok");
+    plog!(progress, "Operation completed in {:.2}s", elapsed.as_secs_f64());
+    println!("ok ({:.3}s)", elapsed.as_secs_f64());
     Ok(())
 }
 
@@ -460,7 +470,9 @@ fn ftdi_read_nand(
     freq_hz: u32,
     progress: &mut dyn Progress,
 ) -> Result<Duration> {
-    use crate::ftdi::spi::{sfc_init, xnand_clear_status, xnand_read_page_raw, XSpi};
+    use crate::ftdi::spi::{
+        sfc_init, xnand_clear_status, xnand_read_batch, XSpi, NAND_READ_BATCH_PAGES,
+    };
 
     plog!(progress, "ftdi freq_hz={freq_hz}");
     let mut xspi = XSpi::open(ftdi_desc, ftdi_index, freq_hz)?;
@@ -501,31 +513,38 @@ fn ftdi_read_nand(
     let mut f = BufWriter::with_capacity(1024 * 1024, f);
 
     let t0 = Instant::now();
-    let mut page_buf = [0u8; 0x210];
+    let mut batch_buf = vec![0u8; NAND_READ_BATCH_PAGES * 0x210];
     let mut big_buf = vec![0u8; 0x840];
-    for i in 0..pages_small {
-        if (i & 0xFF) == 0 {
-            xnand_clear_status(&mut xspi).context("clear status")?;
-        }
 
-        let page = start_small + i;
-        xnand_read_page_raw(&mut xspi, page, &mut page_buf)
-            .with_context(|| format!("read page {page}"))?;
+    let mut i = 0usize;
+    let total_pages = pages_small as usize;
+    while i < total_pages {
+        let batch_size = (total_pages - i).min(NAND_READ_BATCH_PAGES);
+        let start_page = start_small + (i as u32);
 
-        if use_big_pages {
-            let idx = (i as usize % 4) * 0x210;
-            big_buf[idx..idx + 0x210].copy_from_slice(&page_buf);
-            if (i & 3) == 3 {
-                f.write_all(&big_buf)?;
+        xnand_clear_status(&mut xspi).context("clear status")?;
+        xnand_read_batch(&mut xspi, start_page, batch_size, &mut batch_buf[..batch_size * 0x210])
+            .with_context(|| format!("batch read starting at page {start_page} ({batch_size} pages)"))?;
+
+        for p in 0..batch_size {
+            let page_buf = &batch_buf[p * 0x210..(p + 1) * 0x210];
+            if use_big_pages {
+                let idx = ((i + p) % 4) * 0x210;
+                big_buf[idx..idx + 0x210].copy_from_slice(page_buf);
+                if ((i + p) & 3) == 3 {
+                    f.write_all(&big_buf)?;
+                }
+            } else {
+                f.write_all(page_buf)?;
             }
-        } else {
-            f.write_all(&page_buf)?;
         }
 
-        if (i & 0x3FF) == 0 {
-            let done = i + 1;
-            plog!(progress, "read {done}/{pages_small} pages");
-            progress.update(done as u64, pages_small as u64);
+        let old_i = i;
+        i += batch_size;
+
+        if (old_i & 0x3FF) != (i & 0x3FF) || i == total_pages {
+            plog!(progress, "read {i}/{pages_small} pages");
+            progress.update(i as u64, pages_small as u64);
         }
     }
 
@@ -546,8 +565,8 @@ fn ftdi_write_nand(
     progress: &mut dyn Progress,
 ) -> Result<Duration> {
     use crate::ftdi::spi::{
-        sfc_init, xnand_clear_status, xnand_erase_block, xnand_read_page_raw, xnand_write_page_raw,
-        XSpi,
+        sfc_init, xnand_clear_status, xnand_erase_block, xnand_read_batch, xnand_write_page_raw,
+        XSpi, NAND_READ_BATCH_PAGES,
     };
 
     let input_meta = std::fs::metadata(&input).context("stat input")?;
@@ -609,54 +628,70 @@ fn ftdi_write_nand(
         geom.nand_size_mb, unit_name, start, pages, erase, verify
     );
 
-    let f = File::open(input).context("open input")?;
-    let mut f = BufReader::with_capacity(1024 * 1024, f);
+    let input_bytes = std::fs::read(&input).context("read input file into memory")?;
 
     let t0 = Instant::now();
     let mut page_buf = [0u8; 0x210];
-    let mut big_buf = vec![0u8; 0x840];
+    let mut written_batch_buf = vec![0u8; NAND_READ_BATCH_PAGES * 0x210];
+    let mut readback_batch_buf = vec![0u8; NAND_READ_BATCH_PAGES * 0x210];
+    let mut batch_count = 0usize;
+    let mut batch_start_page = start_small;
+
     for i in 0..pages_small {
         if (i & 0xFF) == 0 {
             xnand_clear_status(&mut xspi).context("clear status")?;
         }
 
         if use_big_pages {
-            if (i & 3) == 0 {
-                f.read_exact(&mut big_buf).context("read input page")?;
-            }
-            let idx = (i as usize % 4) * 0x210;
-            page_buf.copy_from_slice(&big_buf[idx..idx + 0x210]);
+            let big_page_idx = (i as usize / 4) * 0x840;
+            let sub_idx = (i as usize % 4) * 0x210;
+            page_buf.copy_from_slice(&input_bytes[big_page_idx + sub_idx..big_page_idx + sub_idx + 0x210]);
         } else {
-            f.read_exact(&mut page_buf).context("read input page")?;
+            let small_page_idx = i as usize * 0x210;
+            page_buf.copy_from_slice(&input_bytes[small_page_idx..small_page_idx + 0x210]);
         }
 
         let page = start_small + i;
         if erase && (page % geom.page_count_in_block) == 0 {
-            xnand_erase_block(&mut xspi, page)
+            xnand_erase_block(&mut xspi, flash_config, page)
                 .with_context(|| format!("erase block at page {page}"))?;
         }
         xnand_write_page_raw(&mut xspi, page, &page_buf)
             .with_context(|| format!("write page {page}"))?;
 
         if verify {
-            let mut verify_buf = [0u8; 0x210];
-            xnand_read_page_raw(&mut xspi, page, &mut verify_buf)
-                .with_context(|| format!("verify read page {page}"))?;
-            if verify_buf != page_buf {
-                let mut first = None;
-                for (idx, (a, b)) in page_buf.iter().zip(verify_buf.iter()).enumerate() {
-                    if a != b {
-                        first = Some((idx, *a, *b));
-                        break;
+            if batch_count == 0 {
+                batch_start_page = page;
+            }
+            written_batch_buf[batch_count * 0x210..(batch_count + 1) * 0x210]
+                .copy_from_slice(&page_buf);
+            batch_count += 1;
+
+            if batch_count == NAND_READ_BATCH_PAGES || i + 1 == pages_small {
+                xnand_read_batch(
+                    &mut xspi,
+                    batch_start_page,
+                    batch_count,
+                    &mut readback_batch_buf[..batch_count * 0x210],
+                )
+                .with_context(|| {
+                    format!("verify batch read starting at page {batch_start_page} ({batch_count} pages)")
+                })?;
+
+                let exp_slice = &written_batch_buf[..batch_count * 0x210];
+                let got_slice = &readback_batch_buf[..batch_count * 0x210];
+                if exp_slice != got_slice {
+                    for (offset, (&exp, &got)) in exp_slice.iter().zip(got_slice.iter()).enumerate() {
+                        if exp != got {
+                            let failed_page = batch_start_page + (offset / 0x210) as u32;
+                            let page_off = offset % 0x210;
+                            bail!(
+                                "verify failed at page {failed_page} (first mismatch at +0x{page_off:x}: expected 0x{exp:02x}, got 0x{got:02x})"
+                            );
+                        }
                     }
                 }
-                if let Some((idx, exp, got)) = first {
-                    bail!(
-                        "verify failed at page {page} (first mismatch at +0x{idx:x}: expected 0x{exp:02x}, got 0x{got:02x})"
-                    );
-                } else {
-                    bail!("verify failed at page {page} (data mismatch)");
-                }
+                batch_count = 0;
             }
         }
 

@@ -36,7 +36,7 @@ pub struct DeviceArgs {
     pub ftdi_index: Option<i32>,
 
     /// SPI clock frequency in Hz
-    #[arg(long, default_value_t = 6_000_000)]
+    #[arg(long, default_value_t = 30_000_000)]
     pub freq_hz: u32,
 
     /// FTDI page format

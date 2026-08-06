@@ -11,13 +11,15 @@ pub struct Device {
 
 impl Device {
 	pub fn with_description(desc: &str) -> Result<Self> {
-		let inner = libftd2xx::Ftdi::with_description(desc)
+		let mut inner = libftd2xx::Ftdi::with_description(desc)
 			.with_context(|| format!("open device by description: {desc:?}"))?;
+		let _ = inner.set_usb_parameters(65536);
 		Ok(Self { inner })
 	}
 
 	pub fn with_index(index: i32) -> Result<Self> {
-		let inner = libftd2xx::Ftdi::with_index(index).with_context(|| format!("open device index {index}"))?;
+		let mut inner = libftd2xx::Ftdi::with_index(index).with_context(|| format!("open device index {index}"))?;
+		let _ = inner.set_usb_parameters(65536);
 		Ok(Self { inner })
 	}
 }
