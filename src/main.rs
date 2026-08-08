@@ -8,6 +8,7 @@ mod picoflasher;
 mod progress;
 mod tcp;
 mod types;
+mod xsvf;
 
 use anyhow::Result;
 use clap::Parser;

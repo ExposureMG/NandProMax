@@ -316,6 +316,9 @@ pub fn cmd_xsvf_write(
 ) -> Result<()> {
     let target_dev = device.unwrap_or(DeviceType::Lpc);
     match target_dev {
+        DeviceType::Ftdi => {
+            crate::xsvf::play_file_ftdi(&input, "auto", None, 6_000_000, progress)?;
+        }
         DeviceType::Lpc | DeviceType::Jrp => {
             let data = std::fs::read(&input)
                 .with_context(|| format!("read XSVF file {:?}", input))?;

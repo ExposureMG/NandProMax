@@ -1,4 +1,5 @@
 pub mod gpio;
+pub mod jtag;
 pub mod spi;
 
 use anyhow::{Context, Result};

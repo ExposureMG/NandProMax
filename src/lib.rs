@@ -15,6 +15,7 @@ pub mod progress;
 pub mod tcp;
 pub mod types;
 pub mod verify;
+pub mod xsvf;
 
 use crate::progress::{Progress, StderrProgress};
 use crate::types::{AdapterType, DeviceType, FtdiPageFormat, MediaType};
