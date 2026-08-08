@@ -712,8 +712,8 @@ fn ftdi_write_nand(
 fn prepare_nand(client: &mut Client, progress: &mut dyn Progress) -> Result<(u32, u32)> {
     let ver = client.cmd_u32(CMD_GET_VERSION, 0).context("GET_VERSION")?;
     plog!(progress, "pfc version=0x{ver:08x}");
-    let _ = client.cmd_u32(CMD_STOP_SMC, 0);
-    let _ = client.cmd_u32(CMD_SET_SMC_WORKAROUND, 1);
+    let _ = client.cmd_void(CMD_STOP_SMC, 0);
+    let _ = client.cmd_void(CMD_SET_SMC_WORKAROUND, 1);
     let flash_config = client
         .cmd_u32(CMD_GET_FLASH_CONFIG, 0)
         .context("GET_FLASH_CONFIG")?;
@@ -744,7 +744,11 @@ fn read_nand(
     let end_block = start + blocks;
     let mut current_block = start;
     while current_block < end_block {
-        let read_bytes = client.cmd_exact_bytes(CMD_READ_FLASH, current_block, NAND_BLOCK_BYTES)?;
+        let (ret, read_bytes) = client.read_with_ret(CMD_READ_FLASH, current_block, NAND_BLOCK_BYTES)?;
+        if ret != 0 {
+            bail!("block read failed at block {current_block}: status {ret}");
+        }
+        let read_bytes = read_bytes.context("missing data buffer")?;
         if read_bytes.len() != NAND_BLOCK_BYTES {
             bail!(
                 "block read mismatch at {current_block}: expected {NAND_BLOCK_BYTES}, got {}",
@@ -760,7 +764,7 @@ fn read_nand(
         }
     }
 
-    let _ = client.cmd_u32(CMD_START_SMC, 0);
+    let _ = client.cmd_void(CMD_START_SMC, 0);
     f.flush().context("flush output")?;
     Ok(())
 }
@@ -824,7 +828,7 @@ fn write_nand(
         }
     }
 
-    let _ = client.cmd_u32(CMD_START_SMC, 0);
+    let _ = client.cmd_void(CMD_START_SMC, 0);
     Ok(())
 }
 
@@ -835,17 +839,17 @@ fn write_nand(
 fn prepare_emmc(client: &mut Client, progress: &mut dyn Progress) -> Result<u32> {
     let ver = client.cmd_u32(CMD_GET_VERSION, 0).context("GET_VERSION")?;
     plog!(progress, "pfc version=0x{ver:08x}");
-    let _ = client.cmd_u32(CMD_STOP_SMC, 0);
-    let _ = client.cmd_u32(CMD_SET_SMC_WORKAROUND, 1);
+    let _ = client.cmd_void(CMD_STOP_SMC, 0);
+    let _ = client.cmd_void(CMD_SET_SMC_WORKAROUND, 1);
 
     let ret = client.cmd_u32(CMD_EMMC_INIT, 0).context("EMMC_INIT")?;
     if ret != 0 {
         bail!("EMMC_INIT failed: {ret}");
     }
 
-    let ret = client.cmd_u32(CMD_EMMC_DETECT, 0).context("EMMC_DETECT")?;
-    if ret != 0 {
-        bail!("EMMC_DETECT failed: {ret}");
+    let ret = client.cmd_u8(CMD_EMMC_DETECT, 0).context("EMMC_DETECT")?;
+    if ret == 0 {
+        bail!("EMMC_DETECT failed (returned 0)");
     }
 
     let ext_csd = client
@@ -874,7 +878,11 @@ fn read_emmc(
     let mut current_lba = start;
 
     while current_lba < end_lba {
-        let read_bytes = client.cmd_exact_bytes(CMD_EMMC_READ, current_lba, EMMC_BLOCK_BYTES)?;
+        let (ret, read_bytes) = client.read_with_ret(CMD_EMMC_READ, current_lba, EMMC_BLOCK_BYTES)?;
+        if ret != 0 {
+            bail!("emmc block read failed at lba {current_lba}: status {ret}");
+        }
+        let read_bytes = read_bytes.context("missing data buffer")?;
         if read_bytes.len() != EMMC_BLOCK_BYTES {
             bail!(
                 "emmc block read mismatch at {current_lba}: expected {EMMC_BLOCK_BYTES}, got {}",
@@ -890,7 +898,7 @@ fn read_emmc(
         }
     }
 
-    let _ = client.cmd_u32(CMD_START_SMC, 0);
+    let _ = client.cmd_void(CMD_START_SMC, 0);
     f.flush().context("flush output")?;
     Ok(())
 }
@@ -949,7 +957,7 @@ fn write_emmc(
         }
     }
 
-    let _ = client.cmd_u32(CMD_START_SMC, 0);
+    let _ = client.cmd_void(CMD_START_SMC, 0);
     Ok(())
 }
 

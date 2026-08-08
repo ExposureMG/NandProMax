@@ -52,6 +52,16 @@ impl Client {
 		matches!(self, Self::Tcp(_))
 	}
 
+	pub fn cmd_void(&mut self, cmd: u8, lba: u32) -> Result<()> {
+		match self {
+			Self::Tcp(c) => {
+				let _ = c.request_response(&pftcp::cmd_payload(cmd, lba))?;
+				Ok(())
+			}
+			Self::Usb(c) => c.cmd_void(cmd, lba),
+		}
+	}
+
 	pub fn cmd_u32(&mut self, cmd: u8, lba: u32) -> Result<u32> {
 		match self {
 			Self::Tcp(c) => c.cmd_u32(cmd, lba),

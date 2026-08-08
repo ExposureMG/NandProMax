@@ -26,6 +26,10 @@ impl Client {
 		Ok(())
 	}
 
+	pub fn cmd_void(&mut self, cmd: u8, lba: u32) -> Result<()> {
+		self.send_cmd(cmd, lba, &[])
+	}
+
 	pub fn cmd_u32(&mut self, cmd: u8, lba: u32) -> Result<u32> {
 		self.send_cmd(cmd, lba, &[])?;
 		self.read_u32()
