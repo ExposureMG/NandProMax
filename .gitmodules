@@ -1,0 +1,3 @@
+[submodule "extern/libxsvf"]
+	path = extern/libxsvf
+	url = https://github.com/ORSoC/libxsvf

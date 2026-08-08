@@ -4,7 +4,6 @@ use anyhow::{anyhow, bail, Context, Result};
 use ftdi_embedded_hal as hal;
 use hal::eh1::spi::Polarity;
 use hal::eh1::spi::SpiBus as _;
-use hal::libftd2xx;
 use hal::ftdi_mpsse::MpsseSettings;
 use hal::ftdi_mpsse::{ClockData, ClockDataIn, ClockDataOut, MpsseCmdExecutor};
 
@@ -36,9 +35,9 @@ impl XSpi {
 			}
 		}
 
-		let num = libftd2xx::num_devices().context("query number of FTDI devices")? as i32;
+		let num = num_devices()?;
 		if num <= 0 {
-			bail!("libftd2xx sees 0 devices");
+			bail!("FTDI subsystem sees 0 devices");
 		}
 
 		let mut errs: Vec<String> = vec![];
@@ -414,7 +413,21 @@ impl XSpi {
 	}
 }
 
+#[cfg(feature = "libftd2xx")]
+fn num_devices() -> Result<i32> {
+	use hal::libftd2xx;
+	libftd2xx::num_devices().map(|n| n as i32).context("query number of FTDI devices")
+}
+
+#[cfg(all(feature = "libftdi", not(feature = "libftd2xx")))]
+fn num_devices() -> Result<i32> {
+	Ok(1)
+}
+
+#[cfg(feature = "libftd2xx")]
 fn open_ftdi2232h(desc_hint: &str, ftdi_index: Option<i32>) -> Result<Device> {
+	use hal::libftd2xx;
+
 	if let Some(index) = ftdi_index {
 		return Device::with_index(index);
 	}
@@ -451,7 +464,15 @@ fn open_ftdi2232h(desc_hint: &str, ftdi_index: Option<i32>) -> Result<Device> {
 		.with_context(|| format!("open FTDI by matched description: {:?}", chosen.description))
 }
 
+#[cfg(all(feature = "libftdi", not(feature = "libftd2xx")))]
+fn open_ftdi2232h(desc_hint: &str, _index: Option<i32>) -> Result<Device> {
+	Device::with_description(desc_hint)
+}
+
+#[cfg(feature = "libftd2xx")]
 fn open_ftdi2232h_auto() -> Result<Device> {
+	use hal::libftd2xx;
+
 	let num = libftd2xx::num_devices().context("query number of FTDI devices")?;
 	let devices = libftd2xx::list_devices().context("list ftdi devices")?;
 	let mut cands: Vec<libftd2xx::DeviceInfo> = devices
@@ -478,6 +499,12 @@ fn open_ftdi2232h_auto() -> Result<Device> {
 		.with_context(|| format!("open FTDI by auto-selected description: {:?}", chosen.description))
 }
 
+#[cfg(all(feature = "libftdi", not(feature = "libftd2xx")))]
+fn open_ftdi2232h_auto() -> Result<Device> {
+	Device::with_description("auto")
+}
+
+#[cfg(feature = "libftd2xx")]
 fn score_desc(desc: &str) -> (u8, String) {
 	let d = desc.to_lowercase();
 	let prefer_b = if d.ends_with(" b") || d.contains(" b ") {

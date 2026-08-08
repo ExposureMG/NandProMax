@@ -444,17 +444,13 @@ pub fn auto_detect_device(
 // ---------------------------------------------------------------------------
 
 fn ftdi_list(progress: &mut dyn Progress) -> Result<()> {
-    use ftdi_embedded_hal::libftd2xx;
-
-    let n = libftd2xx::num_devices().context("FT_ListDevices(NUMBER_ONLY)")?;
-    plog!(progress, "libftd2xx num_devices={n}");
-    let devs = libftd2xx::list_devices().context("FT_GetDeviceInfoList")?;
-    plog!(progress, "libftd2xx list_devices len={}", devs.len());
-    for (i, d) in devs.iter().enumerate() {
+    let devs = crate::ftdi::list_devices()?;
+    plog!(progress, "ftdi list_devices len={}", devs.len());
+    for d in &devs {
         plog!(
             progress,
-            "  [{i}] type={:?} serial={:?} desc={:?}",
-            d.device_type, d.serial_number, d.description
+            "  [{}] type={} serial={} desc={}",
+            d.index, d.device_type, d.serial_number, d.description
         );
     }
     Ok(())
