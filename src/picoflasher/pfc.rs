@@ -44,8 +44,13 @@ impl Client {
 	}
 
 	pub fn connect_usb(port: &str, timeout: Duration) -> Result<(Self, String)> {
-		let c = usb::Client::open(port, timeout)?;
-		Ok((Self::Usb(c), port.to_string()))
+		let resolved_port = if port.is_empty() {
+			usb::Client::detect_port()?
+		} else {
+			port.to_string()
+		};
+		let c = usb::Client::open(&resolved_port, timeout)?;
+		Ok((Self::Usb(c), resolved_port))
 	}
 
 	pub fn supports_multi_write(&self) -> bool {

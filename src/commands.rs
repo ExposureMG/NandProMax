@@ -260,11 +260,37 @@ pub fn cmd_info(
 
 pub fn cmd_list_devices(progress: &mut dyn Progress) -> Result<()> {
     plog!(progress, "Listing available devices:");
-    plog!(progress, "1. FTDI devices:");
+    plog!(progress, "1. Serial ports (PicoFlasher / CDC):");
+    if let Ok(ports) = serialport::available_ports() {
+        if ports.is_empty() {
+            plog!(progress, "   No serial ports found");
+        } else {
+            for p in ports {
+                match &p.port_type {
+                    serialport::SerialPortType::UsbPort(info) => {
+                        plog!(
+                            progress,
+                            "   - {} (VID: 0x{:04x}, PID: 0x{:04x}, Product: {})",
+                            p.port_name,
+                            info.vid,
+                            info.pid,
+                            info.product.as_deref().unwrap_or("Unknown")
+                        );
+                    }
+                    _ => {
+                        plog!(progress, "   - {}", p.port_name);
+                    }
+                }
+            }
+        }
+    } else {
+        plog!(progress, "   Failed to query serial ports");
+    }
+    plog!(progress, "2. FTDI devices:");
     let _ = ftdi_list(progress);
-    plog!(progress, "2. LPC devices:");
+    plog!(progress, "3. LPC devices:");
     let _ = lpc_list(progress);
-    plog!(progress, "3. DemoN devices:");
+    plog!(progress, "4. DemoN devices:");
     let _ = demon_list(progress);
     println!("ok");
     Ok(())
@@ -716,6 +742,13 @@ fn prepare_nand(client: &mut Client, progress: &mut dyn Progress) -> Result<(u32
     let flash_config = client
         .cmd_u32(CMD_GET_FLASH_CONFIG, 0)
         .context("GET_FLASH_CONFIG")?;
+    plog!(progress, "flash_config=0x{flash_config:08x}");
+    if flash_config == 0x00000000 || flash_config == 0xFFFFFFFF {
+        plog!(
+            progress,
+            "Warning: Invalid or unreadable flash_config (0x{flash_config:08x}). Check power, wiring, or console type (SPI vs eMMC)."
+        );
+    }
     let blocks_total = blocks_from_flash_config(flash_config);
     Ok((flash_config, blocks_total))
 }

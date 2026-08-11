@@ -10,11 +10,7 @@ Cross-platform Xbox 360 NAND/eMMC flasher tool.
 - PicoFlasher v4 USB - Untested
 - LPC (JRP v2, NAND-X, etc) - Untested
 - TX DemoN - Untested
-
-**Planned**
-
-- DirtyJTAG / CMSIS-DAP v2
-- JR-Programmer Timing and ISD
+- CMSIS-DAP v2
 
 ## Credits
 

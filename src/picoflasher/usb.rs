@@ -10,11 +10,55 @@ pub struct Client {
 }
 
 impl Client {
+	pub fn detect_port() -> Result<String> {
+		let ports = serialport::available_ports().context("failed to list serial ports")?;
+		for p in &ports {
+			if let serialport::SerialPortType::UsbPort(info) = &p.port_type {
+				if info.vid == 0x2e8a
+					|| info
+						.product
+						.as_deref()
+						.unwrap_or("")
+						.to_lowercase()
+						.contains("pico")
+				{
+					return Ok(p.port_name.clone());
+				}
+			}
+		}
+
+		let acm_ports: Vec<_> = ports
+			.iter()
+			.filter(|p| {
+				matches!(p.port_type, serialport::SerialPortType::UsbPort(_))
+					|| p.port_name.contains("ttyACM")
+					|| p.port_name.contains("ttyUSB")
+			})
+			.collect();
+
+		if acm_ports.len() == 1 {
+			Ok(acm_ports[0].port_name.clone())
+		} else if acm_ports.is_empty() {
+			anyhow::bail!("No USB serial ports (/dev/ttyACM* or /dev/ttyUSB*) found. Please connect your PicoFlasher.")
+		} else {
+			let names: Vec<String> = acm_ports.iter().map(|p| p.port_name.clone()).collect();
+			anyhow::bail!(
+				"Multiple USB serial ports found ({}); please specify one using --serial <PORT>",
+				names.join(", ")
+			)
+		}
+	}
+
 	pub fn open(path: &str, timeout: Duration) -> Result<Self> {
-		let port = serialport::new(path, 115_200)
+		let resolved_path = if path.is_empty() {
+			Self::detect_port()?
+		} else {
+			path.to_string()
+		};
+		let port = serialport::new(&resolved_path, 115_200)
 			.timeout(timeout)
 			.open()
-			.with_context(|| format!("open serial port {path}"))?;
+			.with_context(|| format!("open serial port {resolved_path}"))?;
 		Ok(Self { port })
 	}
 
