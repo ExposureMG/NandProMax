@@ -13,7 +13,9 @@ enum class Device {
     PicoFlasher = NANDPRO_DEV_PICOFLASHER,
     Ftdi = NANDPRO_DEV_FTDI,
     Lpc = NANDPRO_DEV_LPC,
-    Demon = NANDPRO_DEV_DEMON
+    Jrp = NANDPRO_DEV_JRP,
+    Demon = NANDPRO_DEV_DEMON,
+    Esp = NANDPRO_DEV_ESP
 };
 
 enum class Adapter {

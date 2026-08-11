@@ -13,7 +13,9 @@ typedef enum {
     NANDPRO_DEV_PICOFLASHER = 1,
     NANDPRO_DEV_FTDI = 2,
     NANDPRO_DEV_LPC = 3,
-    NANDPRO_DEV_DEMON = 4
+    NANDPRO_DEV_JRP = 4,
+    NANDPRO_DEV_DEMON = 5,
+    NANDPRO_DEV_ESP = 6
 } NandProDeviceC;
 
 typedef enum {
@@ -34,20 +36,93 @@ typedef enum {
     FTDI_PAGE_FORMAT_BIG = 2
 } FtdiPageFormatC;
 
-/**
- * Read NAND or eMMC flash using any hardware flasher device.
- *
- * @param out_path Output file path
- * @param start Start block or LBA offset
- * @param count Block count to read (if count_has_val is true)
- * @param count_has_val Whether count has a value
- * @param device Target hardware device (AUTO probes in priority order)
- * @param adapter Interface adapter (AUTO, USB, TCP)
- * @param media Flash media type (AUTO, SPI, EMMC)
- * @param serial_or_addr Optional serial port or IP:port endpoint (or NULL for default)
- * @param elapsed_secs_out Output pointer to receive operation duration in seconds
- * @return 0 on success, negative error code on failure
- */
+typedef void (*LogCallbackC)(const char *msg, void *user_data);
+typedef void (*ProgressCallbackC)(uint64_t done, uint64_t total, void *user_data);
+
+typedef struct {
+    LogCallbackC log_fn;
+    ProgressCallbackC update_fn;
+    void *user_data;
+} ProgressC;
+
+/** Full C API Exports */
+
+int nandpromax_cmd_read_nand(
+    const char *out_path,
+    NandProDeviceC device,
+    NandProMediaC media_type,
+    uint32_t start,
+    uint32_t count,
+    bool count_has_val,
+    const char *serial,
+    const char *addr,
+    const char *ftdi_desc,
+    int32_t ftdi_index,
+    bool ftdi_index_has_val,
+    uint32_t freq_hz,
+    FtdiPageFormatC page_format,
+    uint64_t timeout_ms,
+    const ProgressC *progress
+);
+
+int nandpromax_cmd_write_nand(
+    const char *input_path,
+    NandProDeviceC device,
+    NandProMediaC media_type,
+    uint32_t start,
+    uint32_t count,
+    bool count_has_val,
+    bool erase,
+    bool verify,
+    const char *serial,
+    const char *addr,
+    const char *ftdi_desc,
+    int32_t ftdi_index,
+    bool ftdi_index_has_val,
+    uint32_t freq_hz,
+    FtdiPageFormatC page_format,
+    uint64_t timeout_ms,
+    const ProgressC *progress
+);
+
+int nandpromax_cmd_info(
+    NandProDeviceC device,
+    const char *serial,
+    const char *addr,
+    const char *ftdi_desc,
+    int32_t ftdi_index,
+    bool ftdi_index_has_val,
+    uint32_t freq_hz,
+    uint64_t timeout_ms,
+    const ProgressC *progress
+);
+
+int nandpromax_cmd_list_devices(const ProgressC *progress);
+
+int nandpromax_cmd_xsvf_detect(NandProDeviceC device, const ProgressC *progress);
+
+int nandpromax_cmd_xsvf_write(const char *input_path, NandProDeviceC device, const ProgressC *progress);
+
+int nandpromax_cmd_serve_tcp(const char *bind_addr, NandProDeviceC device, const ProgressC *progress);
+
+int nandpromax_auto_detect_device(
+    NandProDeviceC user_device,
+    NandProAdapterC user_adapter,
+    NandProMediaC user_media,
+    const char *serial,
+    const char *addr,
+    const char *ftdi_desc,
+    int32_t ftdi_index,
+    bool ftdi_index_has_val,
+    uint32_t freq_hz,
+    uint64_t timeout_ms,
+    NandProDeviceC *out_device,
+    NandProAdapterC *out_adapter,
+    NandProMediaC *out_media
+);
+
+/** Legacy convenience wrappers */
+
 int nandpromax_read_nand_c(
     const char *out_path,
     uint32_t start,
@@ -60,22 +135,6 @@ int nandpromax_read_nand_c(
     double *elapsed_secs_out
 );
 
-/**
- * Write input file to NAND or eMMC flash using any hardware flasher device.
- *
- * @param input_path Input file path
- * @param start Start block or LBA offset
- * @param count Block count to write (if count_has_val is true)
- * @param count_has_val Whether count has a value
- * @param device Target hardware device (AUTO probes in priority order)
- * @param adapter Interface adapter (AUTO, USB, TCP)
- * @param media Flash media type (AUTO, SPI, EMMC)
- * @param serial_or_addr Optional serial port or IP:port endpoint (or NULL for default)
- * @param erase Erase block before writing
- * @param verify Verify written blocks
- * @param elapsed_secs_out Output pointer to receive operation duration in seconds
- * @return 0 on success, negative error code on failure
- */
 int nandpromax_write_nand_c(
     const char *input_path,
     uint32_t start,
@@ -90,9 +149,6 @@ int nandpromax_write_nand_c(
     double *elapsed_secs_out
 );
 
-/**
- * Legacy FTDI-specific NAND read function.
- */
 int ftdi_read_nand_c(
     const char *out_path,
     uint32_t start,
@@ -106,9 +162,6 @@ int ftdi_read_nand_c(
     double *elapsed_secs_out
 );
 
-/**
- * Legacy FTDI-specific NAND write function.
- */
 int ftdi_write_nand_c(
     const char *input_path,
     uint32_t start,
