@@ -14,12 +14,10 @@ Cross-platform Xbox 360 NAND/eMMC flasher tool.
 
 ## Credits
 
-**Direct Code**
 
 - ExposureMG - FTDI, PicoFlasher, ESPFlasher
 - Tuxuser - LPC, TX DemoN
-
-**References**
+- Warp - MacOS testing
 
 - Octal450 and Mena PhenomMod - FTDI2SPI
 - Mena PhenomMod - xsvftool

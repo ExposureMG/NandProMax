@@ -637,12 +637,13 @@ fn ftdi_write_nand(
     };
 
     if start_small >= total_small_pages {
-        bail!("start page {start} out of range");
+        bail!("start page {start} out of range (target NAND max pages: {total_small_pages})");
     }
     if start_small + pages_small > total_small_pages {
+        let nand_size_mb = geom.nand_size_mb;
+        let file_name = input.file_name().unwrap_or_default().to_string_lossy();
         bail!(
-            "requested range {}..{} out of range",
-            start_small,
+            "requested write range (pages {start_small}..{}) exceeds target NAND capacity ({total_small_pages} pages, {nand_size_mb}MB NAND).\n  Input file '{file_name}': {input_len} bytes ({file_pages} pages)\n  Target console: 0x{flash_config:08x} ({nand_size_mb}MB NAND, max {total_small_pages} pages)\nHint: Your dump file is larger than the target console's NAND capacity. Use --count to specify a partial write or verify console/dump compatibility.",
             start_small + pages_small
         );
     }
