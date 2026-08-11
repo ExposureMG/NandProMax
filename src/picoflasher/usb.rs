@@ -15,6 +15,7 @@ impl Client {
 		for p in &ports {
 			if let serialport::SerialPortType::UsbPort(info) = &p.port_type {
 				if info.vid == 0x2e8a
+					|| info.vid == 0x600d
 					|| info
 						.product
 						.as_deref()
@@ -33,6 +34,8 @@ impl Client {
 				matches!(p.port_type, serialport::SerialPortType::UsbPort(_))
 					|| p.port_name.contains("ttyACM")
 					|| p.port_name.contains("ttyUSB")
+					|| p.port_name.contains("usbmodem")
+					|| p.port_name.contains("cu.")
 			})
 			.collect();
 
