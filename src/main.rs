@@ -1,7 +1,6 @@
 mod commands;
 mod demon;
 mod flasher;
-mod ftdi;
 mod interface;
 mod lpc;
 mod picoflasher;
@@ -32,10 +31,6 @@ fn main() -> Result<()> {
                     range.count,
                     device.serial,
                     device.addr,
-                    device.ftdi_desc,
-                    device.ftdi_index,
-                    device.freq_hz,
-                    device.page_format,
                     device.timeout_ms,
                     p,
                 )?;
@@ -51,10 +46,6 @@ fn main() -> Result<()> {
                     write.verify,
                     device.serial,
                     device.addr,
-                    device.ftdi_desc,
-                    device.ftdi_index,
-                    device.freq_hz,
-                    device.page_format,
                     device.timeout_ms,
                     p,
                 )?;
@@ -71,10 +62,6 @@ fn main() -> Result<()> {
                     range.count,
                     device.serial,
                     device.addr,
-                    device.ftdi_desc,
-                    device.ftdi_index,
-                    device.freq_hz,
-                    device.page_format,
                     device.timeout_ms,
                     p,
                 )?;
@@ -90,10 +77,6 @@ fn main() -> Result<()> {
                     write.verify,
                     device.serial,
                     device.addr,
-                    device.ftdi_desc,
-                    device.ftdi_index,
-                    device.freq_hz,
-                    device.page_format,
                     device.timeout_ms,
                     p,
                 )?;
@@ -114,9 +97,6 @@ fn main() -> Result<()> {
                 device.device,
                 device.serial,
                 device.addr,
-                device.ftdi_desc,
-                device.ftdi_index,
-                device.freq_hz,
                 device.timeout_ms,
                 p,
             )?;

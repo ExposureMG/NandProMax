@@ -4,7 +4,6 @@ Cross-platform Xbox 360 NAND/eMMC flasher tool.
 
 ## Devices
 
-- FTDI (xFlasher, Squirt Programmer)
 - ESPFlasher (ESP32)
 - PicoFlasher v4 TCP - Untested
 - PicoFlasher v4 USB - Untested
@@ -15,12 +14,9 @@ Cross-platform Xbox 360 NAND/eMMC flasher tool.
 ## Credits
 
 
-- ExposureMG - FTDI, PicoFlasher, ESPFlasher
+- ExposureMG - PicoFlasher, ESPFlasher
 - Tuxuser - LPC, TX DemoN
-- Warp - MacOS testing
-
-- Octal450 and Mena PhenomMod - FTDI2SPI
-- Mena PhenomMod - xsvftool
+---
 - MATE / Hax360 - PicoFlasher v4
 - [cOz] - DemoNTool
 - G33KatWork & Juvenal - XFlash

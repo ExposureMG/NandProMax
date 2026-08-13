@@ -4,8 +4,6 @@ use clap::ValueEnum;
 pub enum DeviceType {
     /// PicoFlasher v4+ / DirtyPico (USB)
     Pico,
-    /// xFlasher / Squirt (FTDI SPI)
-    Ftdi,
     /// NANDX / MTX (LPC/XFlash protocol)
     Lpc,
     /// JR-Programmer v1 / v2
@@ -27,11 +25,4 @@ pub enum AdapterType {
 pub enum MediaType {
     Spi,
     Emmc,
-}
-
-#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FtdiPageFormat {
-    Auto,
-    Small,
-    Big,
 }

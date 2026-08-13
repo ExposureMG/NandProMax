@@ -11,7 +11,6 @@ extern "C" {
 typedef enum {
     NANDPRO_DEV_AUTO = 0,
     NANDPRO_DEV_PICOFLASHER = 1,
-    NANDPRO_DEV_FTDI = 2,
     NANDPRO_DEV_LPC = 3,
     NANDPRO_DEV_JRP = 4,
     NANDPRO_DEV_DEMON = 5,
@@ -29,12 +28,6 @@ typedef enum {
     NANDPRO_MEDIA_SPI = 1,
     NANDPRO_MEDIA_EMMC = 2
 } NandProMediaC;
-
-typedef enum {
-    FTDI_PAGE_FORMAT_AUTO = 0,
-    FTDI_PAGE_FORMAT_SMALL = 1,
-    FTDI_PAGE_FORMAT_BIG = 2
-} FtdiPageFormatC;
 
 typedef void (*LogCallbackC)(const char *msg, void *user_data);
 typedef void (*ProgressCallbackC)(uint64_t done, uint64_t total, void *user_data);
@@ -56,11 +49,6 @@ int nandpromax_cmd_read_nand(
     bool count_has_val,
     const char *serial,
     const char *addr,
-    const char *ftdi_desc,
-    int32_t ftdi_index,
-    bool ftdi_index_has_val,
-    uint32_t freq_hz,
-    FtdiPageFormatC page_format,
     uint64_t timeout_ms,
     const ProgressC *progress
 );
@@ -76,11 +64,6 @@ int nandpromax_cmd_write_nand(
     bool verify,
     const char *serial,
     const char *addr,
-    const char *ftdi_desc,
-    int32_t ftdi_index,
-    bool ftdi_index_has_val,
-    uint32_t freq_hz,
-    FtdiPageFormatC page_format,
     uint64_t timeout_ms,
     const ProgressC *progress
 );
@@ -89,10 +72,6 @@ int nandpromax_cmd_info(
     NandProDeviceC device,
     const char *serial,
     const char *addr,
-    const char *ftdi_desc,
-    int32_t ftdi_index,
-    bool ftdi_index_has_val,
-    uint32_t freq_hz,
     uint64_t timeout_ms,
     const ProgressC *progress
 );
@@ -111,10 +90,6 @@ int nandpromax_auto_detect_device(
     NandProMediaC user_media,
     const char *serial,
     const char *addr,
-    const char *ftdi_desc,
-    int32_t ftdi_index,
-    bool ftdi_index_has_val,
-    uint32_t freq_hz,
     uint64_t timeout_ms,
     NandProDeviceC *out_device,
     NandProAdapterC *out_adapter,
@@ -144,34 +119,6 @@ int nandpromax_write_nand_c(
     NandProAdapterC adapter,
     NandProMediaC media,
     const char *serial_or_addr,
-    bool erase,
-    bool verify,
-    double *elapsed_secs_out
-);
-
-int ftdi_read_nand_c(
-    const char *out_path,
-    uint32_t start,
-    uint32_t count,
-    bool count_has_val,
-    FtdiPageFormatC page_format,
-    const char *ftdi_desc,
-    int32_t ftdi_index,
-    bool ftdi_index_has_val,
-    uint32_t freq_hz,
-    double *elapsed_secs_out
-);
-
-int ftdi_write_nand_c(
-    const char *input_path,
-    uint32_t start,
-    uint32_t count,
-    bool count_has_val,
-    FtdiPageFormatC page_format,
-    const char *ftdi_desc,
-    int32_t ftdi_index,
-    bool ftdi_index_has_val,
-    uint32_t freq_hz,
     bool erase,
     bool verify,
     double *elapsed_secs_out

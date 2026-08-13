@@ -16,7 +16,7 @@ use crate::picoflasher::pfc::{
 };
 use crate::progress::Progress;
 use crate::tcp::TcpServer;
-use crate::types::{AdapterType, DeviceType, FtdiPageFormat, MediaType};
+use crate::types::{AdapterType, DeviceType, MediaType};
 
 /// Format and emit a log message through a [`Progress`] sink.
 macro_rules! plog {
@@ -37,10 +37,6 @@ pub fn cmd_read_nand(
     count: Option<u32>,
     serial: Option<String>,
     addr: String,
-    ftdi_desc: String,
-    ftdi_index: Option<i32>,
-    freq_hz: u32,
-    page_format: FtdiPageFormat,
     timeout_ms: u64,
     progress: &mut dyn Progress,
 ) -> Result<()> {
@@ -51,9 +47,6 @@ pub fn cmd_read_nand(
         media_type,
         serial.as_deref(),
         &addr,
-        &ftdi_desc,
-        ftdi_index,
-        freq_hz,
         timeout,
     )?;
 
@@ -92,9 +85,6 @@ pub fn cmd_read_nand(
             read_emmc(&mut client, out, start, blocks, progress)?;
             t0.elapsed()
         }
-        (DeviceType::Ftdi, _) => {
-            ftdi_read_nand(out, start, count, page_format, &ftdi_desc, ftdi_index, freq_hz, progress)?
-        }
         (DeviceType::Lpc, _) => {
             let mut client = LpcClient::open().context("Failed to open LPC device")?;
             run_read_nand(&mut client, out, start, count)?
@@ -118,15 +108,11 @@ pub fn cmd_write_nand(
     device: Option<DeviceType>,
     media_type: Option<MediaType>,
     start: u32,
-    count: Option<u32>,
-    erase: bool,
-    verify: bool,
+    _count: Option<u32>,
+    _erase: bool,
+    _verify: bool,
     serial: Option<String>,
     addr: String,
-    ftdi_desc: String,
-    ftdi_index: Option<i32>,
-    freq_hz: u32,
-    page_format: FtdiPageFormat,
     timeout_ms: u64,
     progress: &mut dyn Progress,
 ) -> Result<()> {
@@ -137,9 +123,6 @@ pub fn cmd_write_nand(
         media_type,
         serial.as_deref(),
         &addr,
-        &ftdi_desc,
-        ftdi_index,
-        freq_hz,
         timeout,
     )?;
 
@@ -176,12 +159,6 @@ pub fn cmd_write_nand(
             write_emmc(&mut client, input, start, progress)?;
             t0.elapsed()
         }
-        (DeviceType::Ftdi, _) => {
-            ftdi_write_nand(
-                input, start, count, page_format, &ftdi_desc, ftdi_index, freq_hz, erase, verify,
-                progress,
-            )?
-        }
         (DeviceType::Lpc, _) => {
             let t0 = Instant::now();
             let mut client = LpcClient::open().context("Failed to open LPC device")?;
@@ -207,9 +184,6 @@ pub fn cmd_info(
     device: Option<DeviceType>,
     serial: Option<String>,
     addr: String,
-    ftdi_desc: String,
-    ftdi_index: Option<i32>,
-    freq_hz: u32,
     timeout_ms: u64,
     progress: &mut dyn Progress,
 ) -> Result<()> {
@@ -236,14 +210,6 @@ pub fn cmd_info(
             plog!(progress, "PicoFlasher connected to {resolved}");
             let ver = client.cmd_u32(CMD_GET_VERSION, 0)?;
             plog!(progress, "PicoFlasher Firmware Version: 0x{ver:08x}");
-        }
-        DeviceType::Ftdi => {
-            let mut xspi = crate::ftdi::spi::XSpi::open(&ftdi_desc, ftdi_index, freq_hz)?;
-            xspi.enter_flash_mode()?;
-            let flash_config = xspi.read_u32(0x00)?;
-            let geom = crate::ftdi::spi::sfc_init(flash_config)?;
-            plog!(progress, "FTDI SPI Flasher Config: 0x{flash_config:08x}");
-            plog!(progress, "NAND Size: {} MB", geom.nand_size_mb);
         }
         DeviceType::Lpc => {
             lpc_info(progress)?;
@@ -286,11 +252,9 @@ pub fn cmd_list_devices(progress: &mut dyn Progress) -> Result<()> {
     } else {
         plog!(progress, "   Failed to query serial ports");
     }
-    plog!(progress, "2. FTDI devices:");
-    let _ = ftdi_list(progress);
-    plog!(progress, "3. LPC devices:");
+    plog!(progress, "2. LPC devices:");
     let _ = lpc_list(progress);
-    plog!(progress, "4. DemoN devices:");
+    plog!(progress, "3. DemoN devices:");
     let _ = demon_list(progress);
     println!("ok");
     Ok(())
@@ -342,9 +306,6 @@ pub fn cmd_xsvf_write(
 ) -> Result<()> {
     let target_dev = device.unwrap_or(DeviceType::Lpc);
     match target_dev {
-        DeviceType::Ftdi => {
-            crate::xsvf::play_file_ftdi(&input, "auto", None, 6_000_000, progress)?;
-        }
         DeviceType::Lpc | DeviceType::Jrp => {
             let data = std::fs::read(&input)
                 .with_context(|| format!("read XSVF file {:?}", input))?;
@@ -370,15 +331,12 @@ pub fn cmd_serve_tcp(
     device: Option<DeviceType>,
     progress: &mut dyn Progress,
 ) -> Result<()> {
-    let target_dev = device.unwrap_or(DeviceType::Ftdi);
+    let target_dev = device.unwrap_or(DeviceType::Lpc);
     plog!(
         progress,
         "Starting TCP device server using {target_dev:?} backend on {bind}..."
     );
     match target_dev {
-        DeviceType::Ftdi => {
-            bail!("Serving FTDI over TCP requires connected FTDI hardware");
-        }
         DeviceType::Lpc | DeviceType::Jrp => {
             let client = LpcClient::open().context("Failed to open LPC device")?;
             let mut server = TcpServer::bind(&bind, client)?;
@@ -407,9 +365,6 @@ pub fn auto_detect_device(
     user_media: Option<MediaType>,
     serial: Option<&str>,
     addr: &str,
-    ftdi_desc: &str,
-    ftdi_index: Option<i32>,
-    freq_hz: u32,
     timeout: Duration,
 ) -> Result<(DeviceType, AdapterType, MediaType)> {
     if let Some(dev) = user_device {
@@ -442,11 +397,6 @@ pub fn auto_detect_device(
         }
     }
 
-    if crate::ftdi::spi::XSpi::open(ftdi_desc, ftdi_index, freq_hz).is_ok() {
-        let media = user_media.unwrap_or(MediaType::Spi);
-        return Ok((DeviceType::Ftdi, AdapterType::Usb, media));
-    }
-
     if LpcClient::open().is_ok() {
         let media = user_media.unwrap_or(MediaType::Spi);
         return Ok((DeviceType::Lpc, AdapterType::Usb, media));
@@ -466,269 +416,6 @@ pub fn auto_detect_device(
     let adapter = user_adapter.unwrap_or(AdapterType::Usb);
     let media = user_media.unwrap_or(MediaType::Spi);
     Ok((DeviceType::Pico, adapter, media))
-}
-
-// ---------------------------------------------------------------------------
-// FTDI helpers
-// ---------------------------------------------------------------------------
-
-fn ftdi_list(progress: &mut dyn Progress) -> Result<()> {
-    let devs = crate::ftdi::list_devices()?;
-    plog!(progress, "ftdi list_devices len={}", devs.len());
-    for d in &devs {
-        plog!(
-            progress,
-            "  [{}] type={} serial={} desc={}",
-            d.index, d.device_type, d.serial_number, d.description
-        );
-    }
-    Ok(())
-}
-
-fn ftdi_read_nand(
-    out: PathBuf,
-    start: u32,
-    count: Option<u32>,
-    page_format: FtdiPageFormat,
-    ftdi_desc: &str,
-    ftdi_index: Option<i32>,
-    freq_hz: u32,
-    progress: &mut dyn Progress,
-) -> Result<Duration> {
-    use crate::ftdi::spi::{
-        sfc_init, xnand_clear_status, xnand_read_batch, XSpi, NAND_READ_BATCH_PAGES,
-    };
-
-    plog!(progress, "ftdi freq_hz={freq_hz}");
-    let mut xspi = XSpi::open(ftdi_desc, ftdi_index, freq_hz)?;
-    xspi.enter_flash_mode()?;
-
-    let flash_config = xspi.read_u32(0x00)?;
-    let geom = sfc_init(flash_config)?;
-    let total_small_pages = geom.pages_count_in_nand;
-
-    let use_big_pages = match page_format {
-        FtdiPageFormat::Auto => geom.large_block != 0,
-        FtdiPageFormat::Small => false,
-        FtdiPageFormat::Big => true,
-    };
-
-    let (start_small, pages_small, unit_name) = if use_big_pages {
-        if total_small_pages % 4 != 0 {
-            bail!("NAND page count not divisible by 4; cannot use big-page format");
-        }
-        let total_big_pages = total_small_pages / 4;
-        let pages_big = count.unwrap_or(total_big_pages.saturating_sub(start));
-        (start * 4, pages_big * 4, "big (0x840)")
-    } else {
-        let pages = count.unwrap_or(total_small_pages.saturating_sub(start));
-        (start, pages, "small (0x210)")
-    };
-
-    plog!(
-        progress,
-        "flash_config=0x{flash_config:08x} nand={}MB page_format={} start={} count={}",
-        geom.nand_size_mb,
-        unit_name,
-        start,
-        pages_small / if use_big_pages { 4 } else { 1 }
-    );
-
-    let f = File::create(out).context("open output")?;
-    let mut f = BufWriter::with_capacity(1024 * 1024, f);
-
-    let t0 = Instant::now();
-    let mut batch_buf = vec![0u8; NAND_READ_BATCH_PAGES * 0x210];
-    let mut big_buf = vec![0u8; 0x840];
-
-    let mut i = 0usize;
-    let total_pages = pages_small as usize;
-    while i < total_pages {
-        let batch_size = (total_pages - i).min(NAND_READ_BATCH_PAGES);
-        let start_page = start_small + (i as u32);
-
-        xnand_clear_status(&mut xspi).context("clear status")?;
-        xnand_read_batch(&mut xspi, start_page, batch_size, &mut batch_buf[..batch_size * 0x210])
-            .with_context(|| format!("batch read starting at page {start_page} ({batch_size} pages)"))?;
-
-        for p in 0..batch_size {
-            let page_buf = &batch_buf[p * 0x210..(p + 1) * 0x210];
-            if use_big_pages {
-                let idx = ((i + p) % 4) * 0x210;
-                big_buf[idx..idx + 0x210].copy_from_slice(page_buf);
-                if ((i + p) & 3) == 3 {
-                    f.write_all(&big_buf)?;
-                }
-            } else {
-                f.write_all(page_buf)?;
-            }
-        }
-
-        let old_i = i;
-        i += batch_size;
-
-        if (old_i & 0x3FF) != (i & 0x3FF) || i == total_pages {
-            plog!(progress, "read {i}/{pages_small} pages");
-            progress.update(i as u64, pages_small as u64);
-        }
-    }
-
-    f.flush().context("flush output")?;
-    Ok(t0.elapsed())
-}
-
-fn ftdi_write_nand(
-    input: PathBuf,
-    start: u32,
-    count: Option<u32>,
-    page_format: FtdiPageFormat,
-    ftdi_desc: &str,
-    ftdi_index: Option<i32>,
-    freq_hz: u32,
-    erase: bool,
-    verify: bool,
-    progress: &mut dyn Progress,
-) -> Result<Duration> {
-    use crate::ftdi::spi::{
-        sfc_init, xnand_clear_status, xnand_erase_block, xnand_read_batch, xnand_write_page_raw,
-        XSpi, NAND_READ_BATCH_PAGES,
-    };
-
-    let input_meta = std::fs::metadata(&input).context("stat input")?;
-    let input_len = input_meta.len() as usize;
-
-    plog!(progress, "ftdi freq_hz={freq_hz}");
-    let mut xspi = XSpi::open(ftdi_desc, ftdi_index, freq_hz)?;
-    xspi.enter_flash_mode()?;
-
-    let flash_config = xspi.read_u32(0x00)?;
-    let geom = sfc_init(flash_config)?;
-    let total_small_pages = geom.pages_count_in_nand;
-
-    let use_big_pages = match page_format {
-        FtdiPageFormat::Auto => geom.large_block != 0,
-        FtdiPageFormat::Small => false,
-        FtdiPageFormat::Big => true,
-    };
-
-    let (input_page_bytes, unit_name) = if use_big_pages {
-        (0x840usize, "big (0x840)")
-    } else {
-        (0x210usize, "small (0x210)")
-    };
-
-    if input_len % input_page_bytes != 0 {
-        bail!("input size must be a multiple of 0x{input_page_bytes:x} bytes");
-    }
-
-    let file_pages = (input_len / input_page_bytes) as u32;
-    let pages = count.unwrap_or(file_pages);
-    if pages > file_pages {
-        bail!("input has {file_pages} pages but --count={pages} requested");
-    }
-
-    let (start_small, pages_small) = if use_big_pages {
-        if total_small_pages % 4 != 0 {
-            bail!("NAND page count not divisible by 4; cannot use big-page format");
-        }
-        (start * 4, pages * 4)
-    } else {
-        (start, pages)
-    };
-
-    if start_small >= total_small_pages {
-        bail!("start page {start} out of range (target NAND max pages: {total_small_pages})");
-    }
-    if start_small + pages_small > total_small_pages {
-        let nand_size_mb = geom.nand_size_mb;
-        let file_name = input.file_name().unwrap_or_default().to_string_lossy();
-        bail!(
-            "requested write range (pages {start_small}..{}) exceeds target NAND capacity ({total_small_pages} pages, {nand_size_mb}MB NAND).\n  Input file '{file_name}': {input_len} bytes ({file_pages} pages)\n  Target console: 0x{flash_config:08x} ({nand_size_mb}MB NAND, max {total_small_pages} pages)\nHint: Your dump file is larger than the target console's NAND capacity. Use --count to specify a partial write or verify console/dump compatibility.",
-            start_small + pages_small
-        );
-    }
-
-    plog!(
-        progress,
-        "flash_config=0x{flash_config:08x} nand={}MB page_format={} start={} pages={} erase={} verify={} (input_pages={file_pages})",
-        geom.nand_size_mb, unit_name, start, pages, erase, verify
-    );
-
-    let input_bytes = std::fs::read(&input).context("read input file into memory")?;
-
-    let t0 = Instant::now();
-    let mut page_buf = [0u8; 0x210];
-    let mut written_batch_buf = vec![0u8; NAND_READ_BATCH_PAGES * 0x210];
-    let mut readback_batch_buf = vec![0u8; NAND_READ_BATCH_PAGES * 0x210];
-    let mut batch_count = 0usize;
-    let mut batch_start_page = start_small;
-
-    for i in 0..pages_small {
-        if (i & 0xFF) == 0 {
-            xnand_clear_status(&mut xspi).context("clear status")?;
-        }
-
-        if use_big_pages {
-            let big_page_idx = (i as usize / 4) * 0x840;
-            let sub_idx = (i as usize % 4) * 0x210;
-            page_buf.copy_from_slice(&input_bytes[big_page_idx + sub_idx..big_page_idx + sub_idx + 0x210]);
-        } else {
-            let small_page_idx = i as usize * 0x210;
-            page_buf.copy_from_slice(&input_bytes[small_page_idx..small_page_idx + 0x210]);
-        }
-
-        let page = start_small + i;
-        if erase && (page % geom.page_count_in_block) == 0 {
-            xnand_erase_block(&mut xspi, flash_config, page)
-                .with_context(|| format!("erase block at page {page}"))?;
-        }
-        xnand_write_page_raw(&mut xspi, page, &page_buf)
-            .with_context(|| format!("write page {page}"))?;
-
-        if verify {
-            if batch_count == 0 {
-                batch_start_page = page;
-            }
-            written_batch_buf[batch_count * 0x210..(batch_count + 1) * 0x210]
-                .copy_from_slice(&page_buf);
-            batch_count += 1;
-
-            if batch_count == NAND_READ_BATCH_PAGES || i + 1 == pages_small {
-                xnand_read_batch(
-                    &mut xspi,
-                    batch_start_page,
-                    batch_count,
-                    &mut readback_batch_buf[..batch_count * 0x210],
-                )
-                .with_context(|| {
-                    format!("verify batch read starting at page {batch_start_page} ({batch_count} pages)")
-                })?;
-
-                let exp_slice = &written_batch_buf[..batch_count * 0x210];
-                let got_slice = &readback_batch_buf[..batch_count * 0x210];
-                if exp_slice != got_slice {
-                    for (offset, (&exp, &got)) in exp_slice.iter().zip(got_slice.iter()).enumerate() {
-                        if exp != got {
-                            let failed_page = batch_start_page + (offset / 0x210) as u32;
-                            let page_off = offset % 0x210;
-                            bail!(
-                                "verify failed at page {failed_page} (first mismatch at +0x{page_off:x}: expected 0x{exp:02x}, got 0x{got:02x})"
-                            );
-                        }
-                    }
-                }
-                batch_count = 0;
-            }
-        }
-
-        if (i & 0x3FF) == 0 {
-            let done = i + 1;
-            plog!(progress, "wrote {done}/{pages_small} pages");
-            progress.update(done as u64, pages_small as u64);
-        }
-    }
-
-    Ok(t0.elapsed())
 }
 
 // ---------------------------------------------------------------------------

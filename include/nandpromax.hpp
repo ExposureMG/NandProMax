@@ -11,7 +11,6 @@ namespace NandProMax {
 enum class Device {
     Auto = NANDPRO_DEV_AUTO,
     PicoFlasher = NANDPRO_DEV_PICOFLASHER,
-    Ftdi = NANDPRO_DEV_FTDI,
     Lpc = NANDPRO_DEV_LPC,
     Jrp = NANDPRO_DEV_JRP,
     Demon = NANDPRO_DEV_DEMON,
@@ -28,12 +27,6 @@ enum class Media {
     Auto = NANDPRO_MEDIA_AUTO,
     Spi = NANDPRO_MEDIA_SPI,
     Emmc = NANDPRO_MEDIA_EMMC
-};
-
-enum class PageFormat {
-    Auto = FTDI_PAGE_FORMAT_AUTO,
-    Small = FTDI_PAGE_FORMAT_SMALL,
-    Big = FTDI_PAGE_FORMAT_BIG
 };
 
 struct ReadOptions {

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{ArgAction, Args, Parser, Subcommand};
 
-pub use crate::types::{DeviceType, FtdiPageFormat};
+pub use crate::types::DeviceType;
 
 // ---------------------------------------------------------------------------
 // Shared argument groups (flattened into subcommands)
@@ -26,22 +26,6 @@ pub struct DeviceArgs {
     /// TCP address:port — ESP / PicoFlasher TCP [default: 192.168.4.1:3232]
     #[arg(long, default_value = "192.168.4.1:3232")]
     pub addr: String,
-
-    /// FTDI device description filter
-    #[arg(long, default_value = "auto")]
-    pub ftdi_desc: String,
-
-    /// FTDI device index
-    #[arg(long)]
-    pub ftdi_index: Option<i32>,
-
-    /// SPI clock frequency in Hz
-    #[arg(long, default_value_t = 30_000_000)]
-    pub freq_hz: u32,
-
-    /// FTDI page format
-    #[arg(long, value_enum, default_value_t = FtdiPageFormat::Auto)]
-    pub page_format: FtdiPageFormat,
 }
 
 /// Block / LBA range — read and write.
@@ -75,7 +59,7 @@ pub struct WriteArgs {
 #[derive(Parser, Debug)]
 #[command(name = "nandpromax")]
 #[command(
-    about = "Unified NAND / eMMC / XSVF flasher (PicoFlasher, FTDI, LPC, DemoN)",
+    about = "Unified NAND / eMMC / XSVF flasher (PicoFlasher, LPC, DemoN)",
     long_about = None
 )]
 pub struct Cli {
