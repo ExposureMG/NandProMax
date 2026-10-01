@@ -109,9 +109,16 @@ impl UsbClient {
             .map(Duration::from_millis)
             .unwrap_or(Duration::from_millis(1000));
 
-        let result =
-            self.handle
-                .write_control(rusb::RequestType::Vendor as u8, cmd, 0, 0, &buf, timeout);
+        // bmRequestType must be 0x40 (host-to-device | vendor | device), as in XFlash.py's
+        // usb.TYPE_VENDOR. `RequestType::Vendor as u8` is just the enum discriminant (2).
+        let request_type = rusb::request_type(
+            rusb::Direction::Out,
+            rusb::RequestType::Vendor,
+            rusb::Recipient::Device,
+        );
+        let result = self
+            .handle
+            .write_control(request_type, cmd, 0, 0, &buf, timeout);
 
         result.map_err(|e| anyhow::anyhow!("Control transfer failed: {e}"))?;
         Ok(())

@@ -92,18 +92,26 @@ impl FlashConfig {
                     meta_type = 2;
                     if block_type == 2 {
                         block_size = 0x100;
-                        size_blocks =
-                            1 << (((config >> 19) & 3) + ((config >> 21) & 15) + 23) >> 17;
+                        size_blocks = (1u64
+                            << (((config >> 19) & 3) + ((config >> 21) & 15) + 23)
+                            >> 17) as u32;
                         file_blocks = 0x1E0;
                     } else if block_type == 3 {
                         block_size = 0x200;
-                        size_blocks =
-                            1 << (((config >> 19) & 3) + ((config >> 21) & 15) + 23) >> 18;
+                        size_blocks = (1u64
+                            << (((config >> 19) & 3) + ((config >> 21) & 15) + 23)
+                            >> 18) as u32;
                         file_blocks = 0xF0;
                     }
                 }
             }
             _ => bail!("controller type {} is invalid", controller_type),
+        }
+
+        if size_blocks == 0 {
+            bail!(
+                "unsupported flash config 0x{config:08x} (controller type {controller_type}, block type {block_type})"
+            );
         }
 
         let sizesmallblocks = size_blocks * (block_size / 0x20);
@@ -124,9 +132,10 @@ impl FlashConfig {
         })
     }
 
-    /// Get total file size in bytes
+    /// Get total file size in bytes (data only, without spare/meta)
     pub fn file_size(&self) -> u64 {
-        (self.size_small_blocks as u64) * (self.block_size as u64)
+        // size_small_blocks counts 0x20-page blocks; block_size is a page count, not bytes
+        (self.size_small_blocks as u64) * 0x20 * (self.page_size as u64)
     }
 
     /// Get block size in bytes (including meta data)
@@ -323,5 +332,30 @@ impl LpcClient {
             .usb
             .control_transfer(Command::DevUpdate as u8, 0, 0, None);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn small_block_16mb_config() {
+        // controller type 0, block type 1 => 0x400 small blocks of 0x20 pages
+        let cfg = FlashConfig::parse(0x10).unwrap();
+        assert_eq!(cfg.size_small_blocks, 0x400);
+        assert_eq!(cfg.file_size(), 16 * 1024 * 1024);
+    }
+
+    #[test]
+    fn unsupported_config_is_rejected() {
+        // controller type 1, block type 2 leaves the size unset
+        assert!(FlashConfig::parse((1 << 17) | (2 << 4)).is_err());
+    }
+
+    #[test]
+    fn oversized_shift_does_not_overflow() {
+        // controller type 2, block type 2, max size bits (shift of 41)
+        let _ = FlashConfig::parse((2 << 17) | (3 << 19) | (15 << 21) | (2 << 4));
     }
 }
