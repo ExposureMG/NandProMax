@@ -7,7 +7,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::demon::DemonClient;
 use crate::flasher::{run_read_nand, run_write_nand};
-use crate::lpc::LpcClient;
+use crate::lpc::{FlashConfig, LpcClient};
 use crate::picoflasher::pfc::{
     Client, CMD_EMMC_DETECT, CMD_EMMC_GET_EXT_CSD, CMD_EMMC_INIT, CMD_EMMC_READ, CMD_EMMC_WRITE,
     CMD_EMMC_WRITE_MULTI, CMD_GET_FLASH_CONFIG, CMD_GET_VERSION, CMD_READ_FLASH,
@@ -66,7 +66,11 @@ pub fn cmd_read_nand(
             };
             plog!(progress, "connected to {resolved}");
             let (_flash_config, blocks_total) = prepare_nand(&mut client, progress)?;
-            let blocks = count.unwrap_or(blocks_total.saturating_sub(start));
+            let blocks = match (count, blocks_total) {
+                (Some(c), _) => c,
+                (None, Some(total)) => total.saturating_sub(start),
+                (None, None) => bail!("NAND size unknown for this flash_config; pass an explicit count"),
+            };
             let t0 = Instant::now();
             read_nand(&mut client, out, start, blocks, progress)?;
             t0.elapsed()
@@ -422,7 +426,7 @@ pub fn auto_detect_device(
 // PicoFlasher NAND helpers
 // ---------------------------------------------------------------------------
 
-fn prepare_nand(client: &mut Client, progress: &mut dyn Progress) -> Result<(u32, u32)> {
+fn prepare_nand(client: &mut Client, progress: &mut dyn Progress) -> Result<(u32, Option<u32>)> {
     let ver = client.cmd_u32(CMD_GET_VERSION, 0).context("GET_VERSION")?;
     plog!(progress, "pfc version=0x{ver:08x}");
     let _ = client.cmd_void(CMD_STOP_SMC, 0);
@@ -437,18 +441,23 @@ fn prepare_nand(client: &mut Client, progress: &mut dyn Progress) -> Result<(u32
             "Warning: Invalid or unreadable flash_config (0x{flash_config:08x}). Check power, wiring, or console type (SPI vs eMMC)."
         );
     }
-    let blocks_total = blocks_from_flash_config(flash_config);
+    let blocks_total = match pages_from_flash_config(flash_config) {
+        Ok(pages) => Some(pages),
+        Err(e) => {
+            plog!(progress, "Warning: could not determine NAND size: {e:#}");
+            None
+        }
+    };
     Ok((flash_config, blocks_total))
 }
 
-fn blocks_from_flash_config(config: u32) -> u32 {
-    let size_code = (config >> 17) & 0x03;
-    match size_code {
-        0 => 1024,
-        1 => 2048,
-        2 => 4096,
-        _ => 1024,
-    }
+/// Number of 0x210-byte pages on the NAND. PicoFlasher's `lba` is a page index
+/// (the firmware reads one 0x200 page + 0x10 spare at `lba << 9`), so a 16 MB
+/// NAND is 0x8000 pages, not 1024.
+fn pages_from_flash_config(config: u32) -> Result<u32> {
+    let cfg = FlashConfig::parse(config)
+        .with_context(|| format!("unsupported flash_config 0x{config:08x} (eMMC console? try --media emmc)"))?;
+    Ok((cfg.file_size() / EMMC_BLOCK_BYTES as u64) as u32)
 }
 
 fn read_nand(
@@ -777,4 +786,22 @@ fn lpc_info(progress: &mut dyn Progress) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pages_for_16mb_falcon_config() {
+        // 0x00023010: 16 MB small-block NAND => 0x8000 pages => 0x1080000-byte image
+        let pages = pages_from_flash_config(0x0002_3010).unwrap();
+        assert_eq!(pages, 0x8000);
+        assert_eq!(pages as usize * NAND_BLOCK_BYTES, 0x108_0000);
+    }
+
+    #[test]
+    fn emmc_config_is_not_a_nand_size() {
+        assert!(pages_from_flash_config(0xC046_2002).is_err());
+    }
 }
