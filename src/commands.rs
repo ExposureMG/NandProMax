@@ -1,22 +1,24 @@
+use std::cell::Cell;
 use std::fs::File;
-use std::io::{BufWriter, Read, Write};
-use std::path::PathBuf;
+use std::io::{BufReader, BufWriter, Read, Write};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
+use crate::demon::usb::UsbClient as DemonUsb;
 use crate::demon::DemonClient;
-use crate::flasher::{run_read_nand, run_write_nand};
+use crate::flasher::{check_range, first_mismatch, run_read_nand, run_write_nand};
+use crate::lpc::usb::UsbClient as LpcUsb;
 use crate::lpc::{FlashConfig, LpcClient};
 use crate::picoflasher::pfc::{
     Client, CMD_EMMC_DETECT, CMD_EMMC_GET_EXT_CSD, CMD_EMMC_INIT, CMD_EMMC_READ, CMD_EMMC_WRITE,
-    CMD_EMMC_WRITE_MULTI, CMD_GET_FLASH_CONFIG, CMD_GET_VERSION, CMD_READ_FLASH,
-    CMD_SET_SMC_WORKAROUND, CMD_START_SMC, CMD_STOP_SMC, CMD_WRITE_FLASH, CMD_WRITE_FLASH_MULTI,
-    EMMC_BLOCK_BYTES, NAND_BLOCK_BYTES,
+    CMD_GET_FLASH_CONFIG, CMD_GET_VERSION, CMD_READ_FLASH, CMD_SET_SMC_WORKAROUND, CMD_START_SMC,
+    CMD_STOP_SMC, CMD_WRITE_FLASH, EMMC_BLOCK_BYTES, NAND_BLOCK_BYTES,
 };
 use crate::progress::Progress;
 use crate::tcp::TcpServer;
-use crate::types::{AdapterType, DeviceType, MediaType};
+use crate::types::{DeviceType, MediaType};
 
 /// Format and emit a log message through a [`Progress`] sink.
 macro_rules! plog {
@@ -29,6 +31,7 @@ macro_rules! plog {
 // Top-level command handlers
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 pub fn cmd_read_nand(
     out: PathBuf,
     device: Option<DeviceType>,
@@ -36,180 +39,127 @@ pub fn cmd_read_nand(
     start: u32,
     count: Option<u32>,
     serial: Option<String>,
-    addr: String,
     timeout_ms: u64,
     progress: &mut dyn Progress,
 ) -> Result<()> {
     let timeout = Duration::from_millis(timeout_ms);
-    let (target_dev, target_adapter, target_media) = auto_detect_device(
-        device,
-        None,
-        media_type,
-        serial.as_deref(),
-        &addr,
-        timeout,
-    )?;
+    let (target_dev, target_media) =
+        auto_detect_device(device, media_type, serial.as_deref(), timeout)?;
 
     plog!(
         progress,
-        "Using device={:?} adapter={:?} type={:?}",
-        target_dev, target_adapter, target_media
+        "Using device={:?} type={:?}",
+        target_dev,
+        target_media
     );
 
-    let elapsed = match (target_dev, target_media) {
-        (DeviceType::Pico, MediaType::Spi) => {
-            let (mut client, resolved) = if target_adapter == AdapterType::Tcp {
-                Client::connect_tcp(&addr, timeout)?
-            } else {
-                let port = serial.as_deref().unwrap_or("");
-                Client::connect_usb(port, timeout)?
-            };
-            plog!(progress, "connected to {resolved}");
-            let (_flash_config, blocks_total) = prepare_nand(&mut client, progress)?;
-            let blocks = match (count, blocks_total) {
-                (Some(c), _) => c,
-                (None, Some(total)) => total.saturating_sub(start),
-                (None, None) => bail!("NAND size unknown for this flash_config; pass an explicit count"),
-            };
-            let t0 = Instant::now();
-            read_nand(&mut client, out, start, blocks, progress)?;
-            t0.elapsed()
+    let t0 = Instant::now();
+    match target_dev {
+        DeviceType::Pico => {
+            let mut client = connect_pico(serial.as_deref(), timeout, progress)?;
+            pico_read(
+                &mut client,
+                pico_media(target_media),
+                &out,
+                start,
+                count,
+                progress,
+            )?;
         }
-        (DeviceType::Pico, MediaType::Emmc) => {
-            let (mut client, resolved) = if target_adapter == AdapterType::Tcp {
-                Client::connect_tcp(&addr, timeout)?
-            } else {
-                let port = serial.as_deref().unwrap_or("");
-                Client::connect_usb(port, timeout)?
-            };
-            plog!(progress, "connected to {resolved}");
-            let blocks_total = prepare_emmc(&mut client, progress)?;
-            let blocks = count.unwrap_or(blocks_total.saturating_sub(start));
-            let t0 = Instant::now();
-            read_emmc(&mut client, out, start, blocks, progress)?;
-            t0.elapsed()
-        }
-        (DeviceType::Lpc, _) => {
+        DeviceType::Lpc => {
             let mut client = LpcClient::open().context("Failed to open LPC device")?;
-            run_read_nand(&mut client, out, start, count)?
+            run_read_nand(&mut client, out, start, count, progress)?;
         }
-        (DeviceType::Demon, _) => {
+        DeviceType::Demon => {
             let mut client = DemonClient::open().context("Failed to open DemoN device")?;
-            run_read_nand(&mut client, out, start, count)?
+            run_read_nand(&mut client, out, start, count, progress)?;
         }
-        (DeviceType::Jrp, _) => bail!("JR-Programmer read not yet implemented"),
-        // Esp is resolved to Pico+Tcp by auto_detect_device
-        (DeviceType::Esp, _) => unreachable!("Esp resolved to Pico+Tcp in auto_detect_device"),
-    };
+        DeviceType::Jrp => bail!("JR-Programmer read not yet implemented"),
+    }
 
-    println!("ok ({:.3}s)", elapsed.as_secs_f64());
-    plog!(progress, "Operation completed in {:.2}s", elapsed.as_secs_f64());
+    plog!(
+        progress,
+        "Operation completed in {:.2}s",
+        t0.elapsed().as_secs_f64()
+    );
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn cmd_write_nand(
     input: PathBuf,
     device: Option<DeviceType>,
     media_type: Option<MediaType>,
     start: u32,
-    _count: Option<u32>,
-    _erase: bool,
-    _verify: bool,
+    count: Option<u32>,
+    erase: bool,
+    verify: bool,
     serial: Option<String>,
-    addr: String,
     timeout_ms: u64,
     progress: &mut dyn Progress,
 ) -> Result<()> {
+    // No backend issues an explicit erase; whether a write erases first is up to
+    // the device firmware. The flag is kept for API/CLI compatibility.
+    let _ = erase;
+
     let timeout = Duration::from_millis(timeout_ms);
-    let (target_dev, target_adapter, target_media) = auto_detect_device(
-        device,
-        None,
-        media_type,
-        serial.as_deref(),
-        &addr,
-        timeout,
-    )?;
+    let (target_dev, target_media) =
+        auto_detect_device(device, media_type, serial.as_deref(), timeout)?;
 
     plog!(
         progress,
-        "Using device={:?} adapter={:?} type={:?}",
-        target_dev, target_adapter, target_media
+        "Using device={:?} type={:?}",
+        target_dev,
+        target_media
     );
 
-    let elapsed = match (target_dev, target_media) {
-        (DeviceType::Pico, MediaType::Spi) => {
-            let (mut client, resolved) = if target_adapter == AdapterType::Tcp {
-                Client::connect_tcp(&addr, timeout)?
-            } else {
-                let port = serial.as_deref().unwrap_or("");
-                Client::connect_usb(port, timeout)?
-            };
-            plog!(progress, "connected to {resolved}");
-            let (_flash_config, _blocks_total) = prepare_nand(&mut client, progress)?;
-            let t0 = Instant::now();
-            write_nand(&mut client, input, start, progress)?;
-            t0.elapsed()
+    let t0 = Instant::now();
+    match target_dev {
+        DeviceType::Pico => {
+            let mut client = connect_pico(serial.as_deref(), timeout, progress)?;
+            pico_write(
+                &mut client,
+                pico_media(target_media),
+                &input,
+                start,
+                count,
+                verify,
+                progress,
+            )?;
         }
-        (DeviceType::Pico, MediaType::Emmc) => {
-            let (mut client, resolved) = if target_adapter == AdapterType::Tcp {
-                Client::connect_tcp(&addr, timeout)?
-            } else {
-                let port = serial.as_deref().unwrap_or("");
-                Client::connect_usb(port, timeout)?
-            };
-            plog!(progress, "connected to {resolved}");
-            let _blocks_total = prepare_emmc(&mut client, progress)?;
-            let t0 = Instant::now();
-            write_emmc(&mut client, input, start, progress)?;
-            t0.elapsed()
-        }
-        (DeviceType::Lpc, _) => {
-            let t0 = Instant::now();
+        DeviceType::Lpc => {
             let mut client = LpcClient::open().context("Failed to open LPC device")?;
-            run_write_nand(&mut client, input, start)?;
-            t0.elapsed()
+            run_write_nand(&mut client, input, start, count, verify, progress)?;
         }
-        (DeviceType::Demon, _) => {
-            let t0 = Instant::now();
+        DeviceType::Demon => {
             let mut client = DemonClient::open().context("Failed to open DemoN device")?;
-            run_write_nand(&mut client, input, start)?;
-            t0.elapsed()
+            run_write_nand(&mut client, input, start, count, verify, progress)?;
         }
-        (DeviceType::Jrp, _) => bail!("JR-Programmer write not yet implemented"),
-        (DeviceType::Esp, _) => unreachable!("Esp resolved to Pico+Tcp in auto_detect_device"),
-    };
+        DeviceType::Jrp => bail!("JR-Programmer write not yet implemented"),
+    }
 
-    plog!(progress, "Operation completed in {:.2}s", elapsed.as_secs_f64());
-    println!("ok ({:.3}s)", elapsed.as_secs_f64());
+    plog!(
+        progress,
+        "Operation completed in {:.2}s",
+        t0.elapsed().as_secs_f64()
+    );
     Ok(())
 }
 
 pub fn cmd_info(
     device: Option<DeviceType>,
     serial: Option<String>,
-    addr: String,
     timeout_ms: u64,
     progress: &mut dyn Progress,
 ) -> Result<()> {
     let timeout = Duration::from_millis(timeout_ms);
-    let target_dev = match device {
-        Some(DeviceType::Esp) => {
-            // ESP = PicoFlasher over TCP
-            let (mut client, resolved) = Client::connect_tcp(&addr, timeout)?;
-            plog!(progress, "PicoFlasher (ESP/TCP) connected to {resolved}");
-            let ver = client.cmd_u32(CMD_GET_VERSION, 0)?;
-            plog!(progress, "PicoFlasher Firmware Version: 0x{ver:08x}");
-            println!("ok");
-            return Ok(());
-        }
-        other => other.unwrap_or(DeviceType::Pico),
-    };
+    let target_dev = device.unwrap_or(DeviceType::Pico);
 
     match target_dev {
         DeviceType::Pico => {
             let (mut client, resolved) = {
                 let port = serial.as_deref().unwrap_or("");
-                Client::connect_usb(port, timeout)?
+                Client::connect(port, timeout)?
             };
             plog!(progress, "PicoFlasher connected to {resolved}");
             let ver = client.cmd_u32(CMD_GET_VERSION, 0)?;
@@ -222,9 +172,7 @@ pub fn cmd_info(
         DeviceType::Demon => {
             demon_info(progress)?;
         }
-        DeviceType::Esp => unreachable!(),
     }
-    println!("ok");
     Ok(())
 }
 
@@ -257,22 +205,20 @@ pub fn cmd_list_devices(progress: &mut dyn Progress) -> Result<()> {
         plog!(progress, "   Failed to query serial ports");
     }
     plog!(progress, "2. LPC devices:");
-    let _ = lpc_list(progress);
+    lpc_list(progress);
     plog!(progress, "3. DemoN devices:");
-    let _ = demon_list(progress);
-    println!("ok");
+    demon_list(progress);
     Ok(())
 }
 
-pub fn cmd_xsvf_detect(
-    device: Option<DeviceType>,
-    progress: &mut dyn Progress,
-) -> Result<()> {
+pub fn cmd_xsvf_detect(device: Option<DeviceType>, progress: &mut dyn Progress) -> Result<()> {
     let target_dev = device.unwrap_or(DeviceType::Lpc);
     match target_dev {
         DeviceType::Lpc | DeviceType::Jrp => {
             let mut client = LpcClient::open().context("Failed to open LPC/XFlash device")?;
-            client.init().context("Failed to initialize LPC/XFlash device")?;
+            client
+                .init()
+                .context("Failed to initialize LPC/XFlash device")?;
             let version = client.version.unwrap_or(0);
             plog!(progress, "LPC/XFlash Device Information:");
             plog!(progress, "  ARM Version: {version}");
@@ -299,7 +245,6 @@ pub fn cmd_xsvf_detect(
         }
         other => bail!("XSVF detect not supported on {:?}", other),
     }
-    println!("ok");
     Ok(())
 }
 
@@ -311,12 +256,14 @@ pub fn cmd_xsvf_write(
     let target_dev = device.unwrap_or(DeviceType::Lpc);
     match target_dev {
         DeviceType::Lpc | DeviceType::Jrp => {
-            let data = std::fs::read(&input)
-                .with_context(|| format!("read XSVF file {:?}", input))?;
+            let data =
+                std::fs::read(&input).with_context(|| format!("read XSVF file {:?}", input))?;
             plog!(progress, "Loaded {} bytes from {:?}", data.len(), input);
 
             let mut client = LpcClient::open().context("Failed to open LPC/XFlash device")?;
-            client.init().context("Failed to initialize LPC/XFlash device")?;
+            client
+                .init()
+                .context("Failed to initialize LPC/XFlash device")?;
             client.xsvf_init().context("XSVF init failed")?;
 
             plog!(progress, "Programming XSVF...");
@@ -326,7 +273,6 @@ pub fn cmd_xsvf_write(
         }
         other => bail!("XSVF write not supported on {:?}", other),
     }
-    println!("ok");
     Ok(())
 }
 
@@ -344,18 +290,17 @@ pub fn cmd_serve_tcp(
         DeviceType::Lpc | DeviceType::Jrp => {
             let client = LpcClient::open().context("Failed to open LPC device")?;
             let mut server = TcpServer::bind(&bind, client)?;
-            server.run()?;
+            server.run(progress)?;
         }
         DeviceType::Demon => {
             let client = DemonClient::open().context("Failed to open DemoN device")?;
             let mut server = TcpServer::bind(&bind, client)?;
-            server.run()?;
+            server.run(progress)?;
         }
-        DeviceType::Pico | DeviceType::Esp => {
-            bail!("PicoFlasher already functions as a TCP flasher endpoint");
+        DeviceType::Pico => {
+            bail!("serve-tcp supports the LPC and DemoN backends only");
         }
     }
-    println!("ok");
     Ok(())
 }
 
@@ -365,72 +310,127 @@ pub fn cmd_serve_tcp(
 
 pub fn auto_detect_device(
     user_device: Option<DeviceType>,
-    user_adapter: Option<AdapterType>,
     user_media: Option<MediaType>,
     serial: Option<&str>,
-    addr: &str,
     timeout: Duration,
-) -> Result<(DeviceType, AdapterType, MediaType)> {
-    if let Some(dev) = user_device {
-        match dev {
-            // ESP = PicoFlasher over TCP
-            DeviceType::Esp => {
-                let media = user_media.unwrap_or(MediaType::Spi);
-                return Ok((DeviceType::Pico, AdapterType::Tcp, media));
-            }
-            DeviceType::Jrp => {
-                bail!("JR-Programmer is not yet supported");
-            }
-            _ => {
-                let adapter = user_adapter.unwrap_or(AdapterType::Usb);
-                let media = user_media.unwrap_or(MediaType::Spi);
-                return Ok((dev, adapter, media));
-            }
-        }
-    }
+) -> Result<(DeviceType, MediaType)> {
+    let media = user_media.unwrap_or(MediaType::Spi);
 
-    if user_adapter == Some(AdapterType::Tcp) {
-        let media = user_media.unwrap_or(MediaType::Spi);
-        return Ok((DeviceType::Pico, AdapterType::Tcp, media));
+    if let Some(dev) = user_device {
+        if dev == DeviceType::Jrp {
+            bail!("JR-Programmer is not yet supported");
+        }
+        return Ok((dev, media));
     }
 
     if let Some(port) = serial {
-        if Client::connect_usb(port, timeout).is_ok() {
-            let media = user_media.unwrap_or(MediaType::Spi);
-            return Ok((DeviceType::Pico, AdapterType::Usb, media));
+        if Client::connect(port, timeout).is_ok() {
+            return Ok((DeviceType::Pico, media));
         }
     }
 
-    if LpcClient::open().is_ok() {
-        let media = user_media.unwrap_or(MediaType::Spi);
-        return Ok((DeviceType::Lpc, AdapterType::Usb, media));
+    if LpcUsb::is_present() {
+        return Ok((DeviceType::Lpc, media));
     }
 
-    if DemonClient::open().is_ok() {
-        let media = user_media.unwrap_or(MediaType::Spi);
-        return Ok((DeviceType::Demon, AdapterType::Usb, media));
+    if DemonUsb::is_present() {
+        return Ok((DeviceType::Demon, media));
     }
 
-    // Try ESP/TCP as last resort if an addr is reachable
-    if Client::connect_tcp(addr, timeout).is_ok() {
-        let media = user_media.unwrap_or(MediaType::Spi);
-        return Ok((DeviceType::Pico, AdapterType::Tcp, media));
-    }
-
-    let adapter = user_adapter.unwrap_or(AdapterType::Usb);
-    let media = user_media.unwrap_or(MediaType::Spi);
-    Ok((DeviceType::Pico, adapter, media))
+    Ok((DeviceType::Pico, media))
 }
 
 // ---------------------------------------------------------------------------
-// PicoFlasher NAND helpers
+// PicoFlasher helpers (NAND and eMMC share one implementation)
 // ---------------------------------------------------------------------------
 
-fn prepare_nand(client: &mut Client, progress: &mut dyn Progress) -> Result<(u32, Option<u32>)> {
+/// Per-medium parameters of the PicoFlasher block commands.
+struct PicoMedia {
+    /// Medium name used in error messages.
+    label: &'static str,
+    /// What the device calls an address: "block" (NAND page) or "lba" (eMMC sector).
+    unit: &'static str,
+    read_cmd: u8,
+    write_cmd: u8,
+    block_bytes: usize,
+    /// Progress is reported every `mask + 1` blocks.
+    progress_mask: u32,
+    /// Medium-specific init after SMC is stopped; returns the size in blocks if known.
+    prepare: fn(&mut Client, &mut dyn Progress) -> Result<Option<u32>>,
+}
+
+const NAND_MEDIA: PicoMedia = PicoMedia {
+    label: "nand",
+    unit: "block",
+    read_cmd: CMD_READ_FLASH,
+    write_cmd: CMD_WRITE_FLASH,
+    block_bytes: NAND_BLOCK_BYTES,
+    progress_mask: 0x3F,
+    prepare: prepare_nand,
+};
+
+const EMMC_MEDIA: PicoMedia = PicoMedia {
+    label: "emmc",
+    unit: "lba",
+    read_cmd: CMD_EMMC_READ,
+    write_cmd: CMD_EMMC_WRITE,
+    block_bytes: EMMC_BLOCK_BYTES,
+    progress_mask: 0x3FF,
+    prepare: prepare_emmc,
+};
+
+fn pico_media(media: MediaType) -> &'static PicoMedia {
+    match media {
+        MediaType::Spi => &NAND_MEDIA,
+        MediaType::Emmc => &EMMC_MEDIA,
+    }
+}
+
+fn connect_pico(
+    serial: Option<&str>,
+    timeout: Duration,
+    progress: &mut dyn Progress,
+) -> Result<Client> {
+    let (client, resolved) = Client::connect(serial.unwrap_or(""), timeout)?;
+    plog!(progress, "connected to {resolved}");
+    Ok(client)
+}
+
+/// Stop the console SMC, run `op`, then restart the SMC unless `op` failed
+/// after setting `keep_stopped`. Writes set it once they start modifying the
+/// device: after a failed or unverified write the console is deliberately left
+/// held so it cannot boot a half-written image (re-run the write, or power
+/// cycle the console, to recover). Reads and failures before the first write
+/// always restart. The result of `op` is returned unchanged; a failed restart
+/// is only logged so it cannot mask the real error. A panic inside `op`
+/// leaves the SMC stopped.
+fn with_smc_stopped<T>(
+    client: &mut Client,
+    progress: &mut dyn Progress,
+    keep_stopped: &Cell<bool>,
+    op: impl FnOnce(&mut Client, &mut dyn Progress) -> Result<T>,
+) -> Result<T> {
     let ver = client.cmd_u32(CMD_GET_VERSION, 0).context("GET_VERSION")?;
     plog!(progress, "pfc version=0x{ver:08x}");
     let _ = client.cmd_void(CMD_STOP_SMC, 0);
     let _ = client.cmd_void(CMD_SET_SMC_WORKAROUND, 1);
+
+    let result = op(client, progress);
+
+    if result.is_err() && keep_stopped.get() {
+        plog!(
+            progress,
+            "Warning: write did not complete; leaving the console SMC stopped so it does not start with a partial image"
+        );
+        return result;
+    }
+    if let Err(e) = client.cmd_void(CMD_START_SMC, 0) {
+        plog!(progress, "Warning: failed to restart SMC: {e:#}");
+    }
+    result
+}
+
+fn prepare_nand(client: &mut Client, progress: &mut dyn Progress) -> Result<Option<u32>> {
     let flash_config = client
         .cmd_u32(CMD_GET_FLASH_CONFIG, 0)
         .context("GET_FLASH_CONFIG")?;
@@ -441,136 +441,26 @@ fn prepare_nand(client: &mut Client, progress: &mut dyn Progress) -> Result<(u32
             "Warning: Invalid or unreadable flash_config (0x{flash_config:08x}). Check power, wiring, or console type (SPI vs eMMC)."
         );
     }
-    let blocks_total = match pages_from_flash_config(flash_config) {
-        Ok(pages) => Some(pages),
+    match pages_from_flash_config(flash_config) {
+        Ok(pages) => Ok(Some(pages)),
         Err(e) => {
             plog!(progress, "Warning: could not determine NAND size: {e:#}");
-            None
+            Ok(None)
         }
-    };
-    Ok((flash_config, blocks_total))
+    }
 }
 
 /// Number of 0x210-byte pages on the NAND. PicoFlasher's `lba` is a page index
 /// (the firmware reads one 0x200 page + 0x10 spare at `lba << 9`), so a 16 MB
 /// NAND is 0x8000 pages, not 1024.
 fn pages_from_flash_config(config: u32) -> Result<u32> {
-    let cfg = FlashConfig::parse(config)
-        .with_context(|| format!("unsupported flash_config 0x{config:08x} (eMMC console? try --media emmc)"))?;
+    let cfg = FlashConfig::parse(config).with_context(|| {
+        format!("unsupported flash_config 0x{config:08x} (eMMC console? try --media emmc)")
+    })?;
     Ok((cfg.file_size() / EMMC_BLOCK_BYTES as u64) as u32)
 }
 
-fn read_nand(
-    client: &mut Client,
-    out: PathBuf,
-    start: u32,
-    blocks: u32,
-    progress: &mut dyn Progress,
-) -> Result<()> {
-    let f = File::create(out).context("open output")?;
-    let mut f = BufWriter::with_capacity(1024 * 1024, f);
-
-    let end_block = start + blocks;
-    let mut current_block = start;
-    while current_block < end_block {
-        let (ret, read_bytes) = client.read_with_ret(CMD_READ_FLASH, current_block, NAND_BLOCK_BYTES)?;
-        if ret != 0 {
-            bail!("block read failed at block {current_block}: status {ret}");
-        }
-        let read_bytes = read_bytes.context("missing data buffer")?;
-        if read_bytes.len() != NAND_BLOCK_BYTES {
-            bail!(
-                "block read mismatch at {current_block}: expected {NAND_BLOCK_BYTES}, got {}",
-                read_bytes.len()
-            );
-        }
-        f.write_all(&read_bytes)?;
-        current_block += 1;
-        if ((current_block - start) & 0x3F) == 0 || current_block == end_block {
-            let done = current_block - start;
-            plog!(progress, "read {done}/{blocks} blocks");
-            progress.update(done as u64, blocks as u64);
-        }
-    }
-
-    let _ = client.cmd_void(CMD_START_SMC, 0);
-    f.flush().context("flush output")?;
-    Ok(())
-}
-
-fn write_nand(
-    client: &mut Client,
-    input: PathBuf,
-    start: u32,
-    progress: &mut dyn Progress,
-) -> Result<()> {
-    let mut buf = vec![];
-    File::open(input)
-        .context("open input")?
-        .read_to_end(&mut buf)
-        .context("read input")?;
-
-    if buf.len() % NAND_BLOCK_BYTES != 0 {
-        bail!(
-            "input size must be a multiple of 0x{:x} (got 0x{:x})",
-            NAND_BLOCK_BYTES,
-            buf.len()
-        );
-    }
-
-    let blocks = (buf.len() / NAND_BLOCK_BYTES) as u32;
-    let mut i = 0u32;
-    if client.supports_multi_write() {
-        while i < blocks {
-            let remaining = blocks - i;
-            let chunk_blocks = remaining.min(64);
-            let block = start + i;
-            let off = (i as usize) * NAND_BLOCK_BYTES;
-            let end = off + (chunk_blocks as usize) * NAND_BLOCK_BYTES;
-            let (ret, idx) = client.write_multi(
-                CMD_WRITE_FLASH_MULTI,
-                block,
-                NAND_BLOCK_BYTES,
-                &buf[off..end],
-            )?;
-            if ret != 0 {
-                bail!("write failed at block {}: {ret}", block + idx);
-            }
-            i += chunk_blocks;
-            plog!(progress, "written {i}/{blocks} blocks");
-            progress.update(i as u64, blocks as u64);
-        }
-    } else {
-        while i < blocks {
-            let block = start + i;
-            let off = (i as usize) * NAND_BLOCK_BYTES;
-            let end = off + NAND_BLOCK_BYTES;
-            let ret = client.write_single(CMD_WRITE_FLASH, block, &buf[off..end])?;
-            if ret != 0 {
-                bail!("write failed at block {}: {ret}", block);
-            }
-            i += 1;
-            if (i & 0x3F) == 0 || i == blocks {
-                plog!(progress, "written {i}/{blocks} blocks");
-                progress.update(i as u64, blocks as u64);
-            }
-        }
-    }
-
-    let _ = client.cmd_void(CMD_START_SMC, 0);
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// PicoFlasher eMMC helpers
-// ---------------------------------------------------------------------------
-
-fn prepare_emmc(client: &mut Client, progress: &mut dyn Progress) -> Result<u32> {
-    let ver = client.cmd_u32(CMD_GET_VERSION, 0).context("GET_VERSION")?;
-    plog!(progress, "pfc version=0x{ver:08x}");
-    let _ = client.cmd_void(CMD_STOP_SMC, 0);
-    let _ = client.cmd_void(CMD_SET_SMC_WORKAROUND, 1);
-
+fn prepare_emmc(client: &mut Client, progress: &mut dyn Progress) -> Result<Option<u32>> {
     let ret = client.cmd_u32(CMD_EMMC_INIT, 0).context("EMMC_INIT")?;
     if ret != 0 {
         bail!("EMMC_INIT failed: {ret}");
@@ -589,104 +479,171 @@ fn prepare_emmc(client: &mut Client, progress: &mut dyn Progress) -> Result<u32>
     }
 
     let sec_count = u32::from_le_bytes(ext_csd[212..216].try_into().unwrap());
-    plog!(progress, "emmc sec_count={sec_count} (~{} MB)", sec_count / 2048);
-    Ok(sec_count)
+    plog!(
+        progress,
+        "emmc sec_count={sec_count} (~{} MB)",
+        sec_count / 2048
+    );
+    Ok(Some(sec_count))
 }
 
-fn read_emmc(
-    client: &mut Client,
-    out: PathBuf,
-    start: u32,
-    blocks: u32,
-    progress: &mut dyn Progress,
-) -> Result<()> {
-    let f = File::create(out).context("open output")?;
-    let mut f = BufWriter::with_capacity(1024 * 1024, f);
-
-    let end_lba = start + blocks;
-    let mut current_lba = start;
-
-    while current_lba < end_lba {
-        let (ret, read_bytes) = client.read_with_ret(CMD_EMMC_READ, current_lba, EMMC_BLOCK_BYTES)?;
-        if ret != 0 {
-            bail!("emmc block read failed at lba {current_lba}: status {ret}");
-        }
-        let read_bytes = read_bytes.context("missing data buffer")?;
-        if read_bytes.len() != EMMC_BLOCK_BYTES {
-            bail!(
-                "emmc block read mismatch at {current_lba}: expected {EMMC_BLOCK_BYTES}, got {}",
-                read_bytes.len()
-            );
-        }
-        f.write_all(&read_bytes)?;
-        current_lba += 1;
-        if ((current_lba - start) & 0x3FF) == 0 || current_lba == end_lba {
-            let done = current_lba - start;
-            plog!(progress, "read {done}/{blocks} blocks");
-            progress.update(done as u64, blocks as u64);
-        }
-    }
-
-    let _ = client.cmd_void(CMD_START_SMC, 0);
-    f.flush().context("flush output")?;
-    Ok(())
+/// Number of blocks a read covers: the explicit count, else everything from
+/// `start` to the end of the medium. The range is validated against the size
+/// when it is known.
+fn plan_read(media: &PicoMedia, start: u32, count: Option<u32>, total: Option<u32>) -> Result<u32> {
+    let blocks = match (count, total) {
+        (Some(c), _) => c,
+        (None, Some(t)) => t.saturating_sub(start),
+        (None, None) => bail!(
+            "{} size unknown for this flash_config; pass an explicit count",
+            media.label
+        ),
+    };
+    check_range(start, blocks, total)?;
+    Ok(blocks)
 }
 
-fn write_emmc(
-    client: &mut Client,
-    input: PathBuf,
+/// Number of blocks a write covers: `--count` if given (must not exceed the
+/// input), else the whole input. The range is validated against the size when
+/// it is known.
+fn plan_write(
+    media: &PicoMedia,
+    input_len: u64,
     start: u32,
-    progress: &mut dyn Progress,
-) -> Result<()> {
-    let mut buf = vec![];
-    File::open(input)
-        .context("open input")?
-        .read_to_end(&mut buf)
-        .context("read input")?;
-
-    if buf.len() % EMMC_BLOCK_BYTES != 0 {
+    count: Option<u32>,
+    total: Option<u32>,
+) -> Result<u32> {
+    let block_bytes = media.block_bytes as u64;
+    if input_len % block_bytes != 0 {
         bail!(
-            "input size must be a multiple of 0x200 (got 0x{:x})",
-            buf.len()
+            "input size must be a multiple of 0x{:x} (got 0x{input_len:x})",
+            media.block_bytes
         );
     }
+    let file_blocks =
+        u32::try_from(input_len / block_bytes).context("input file has too many blocks")?;
+    let blocks = count.unwrap_or(file_blocks);
+    if blocks > file_blocks {
+        bail!("--count {blocks} exceeds the {file_blocks} blocks in the input file");
+    }
+    check_range(start, blocks, total)?;
+    Ok(blocks)
+}
 
-    let blocks = (buf.len() / EMMC_BLOCK_BYTES) as u32;
-    let mut i = 0u32;
-    if client.supports_multi_write() {
-        while i < blocks {
-            let remaining = blocks - i;
-            let chunk_blocks = remaining.min(64);
+fn pico_read(
+    client: &mut Client,
+    media: &PicoMedia,
+    out: &Path,
+    start: u32,
+    count: Option<u32>,
+    progress: &mut dyn Progress,
+) -> Result<()> {
+    with_smc_stopped(client, progress, &Cell::new(false), |client, progress| {
+        let total = (media.prepare)(client, progress)?;
+        let blocks = plan_read(media, start, count, total)?;
+
+        let f = File::create(out).context("open output")?;
+        let mut f = BufWriter::with_capacity(1024 * 1024, f);
+
+        for i in 0..blocks {
             let lba = start + i;
-            let off = (i as usize) * EMMC_BLOCK_BYTES;
-            let end = off + (chunk_blocks as usize) * EMMC_BLOCK_BYTES;
-            let (ret, idx) =
-                client.write_multi(CMD_EMMC_WRITE_MULTI, lba, EMMC_BLOCK_BYTES, &buf[off..end])?;
+            let (ret, data) = client.read_with_ret(media.read_cmd, lba, media.block_bytes)?;
             if ret != 0 {
-                bail!("write failed at lba {}: {ret}", lba + idx);
+                bail!(
+                    "{} read failed at {} {lba}: status {ret}",
+                    media.label,
+                    media.unit
+                );
             }
-            i += chunk_blocks;
-            plog!(progress, "written {i}/{blocks} blocks");
-            progress.update(i as u64, blocks as u64);
+            let data = data.context("missing data buffer")?;
+            if data.len() != media.block_bytes {
+                bail!(
+                    "{} read mismatch at {} {lba}: expected {}, got {}",
+                    media.label,
+                    media.unit,
+                    media.block_bytes,
+                    data.len()
+                );
+            }
+            f.write_all(&data).context("write output")?;
+            let done = i + 1;
+            if (done & media.progress_mask) == 0 || done == blocks {
+                plog!(progress, "read {done}/{blocks} blocks");
+                progress.update(done as u64, blocks as u64);
+            }
         }
-    } else {
-        while i < blocks {
-            let lba = start + i;
-            let off = (i as usize) * EMMC_BLOCK_BYTES;
-            let end = off + EMMC_BLOCK_BYTES;
-            let ret = client.write_single(CMD_EMMC_WRITE, lba, &buf[off..end])?;
+
+        f.flush().context("flush output")?;
+        Ok(())
+    })
+}
+
+fn pico_write(
+    client: &mut Client,
+    media: &PicoMedia,
+    input: &Path,
+    start: u32,
+    count: Option<u32>,
+    verify: bool,
+    progress: &mut dyn Progress,
+) -> Result<()> {
+    let keep_stopped = Cell::new(false);
+    with_smc_stopped(client, progress, &keep_stopped, |client, progress| {
+        let total = (media.prepare)(client, progress)?;
+
+        let f = File::open(input).context("open input")?;
+        let input_len = f.metadata().context("stat input")?.len();
+        let blocks = plan_write(media, input_len, start, count, total)?;
+        let mut reader = BufReader::with_capacity(1024 * 1024, f);
+
+        let mut buf = vec![0u8; media.block_bytes];
+
+        let mut done = 0u32;
+        while done < blocks {
+            reader.read_exact(&mut buf).context("read input")?;
+            keep_stopped.set(true);
+            // Cannot overflow: plan_write checked start + blocks.
+            let lba = start + done;
+
+            let ret = client.write_single(media.write_cmd, lba, &buf)?;
             if ret != 0 {
-                bail!("write failed at lba {}: {ret}", lba);
+                bail!("write failed at {} {lba}: {ret}", media.unit);
             }
-            i += 1;
-            if (i & 0x3FF) == 0 || i == blocks {
-                plog!(progress, "written {i}/{blocks} blocks");
-                progress.update(i as u64, blocks as u64);
+
+            if verify {
+                verify_chunk(client, media, lba, &buf)?;
             }
+
+            done += 1;
+            if (done & media.progress_mask) == 0 || done == blocks {
+                plog!(progress, "written {done}/{blocks} blocks");
+                progress.update(done as u64, blocks as u64);
+            }
+        }
+
+        if verify {
+            plog!(progress, "verified {blocks} blocks");
+        }
+        Ok(())
+    })
+}
+
+/// Read back the blocks just written at `lba` and compare them with `expected`.
+fn verify_chunk(client: &mut Client, media: &PicoMedia, lba: u32, expected: &[u8]) -> Result<()> {
+    for (i, want) in expected.chunks_exact(media.block_bytes).enumerate() {
+        let addr = lba + i as u32;
+        let (ret, data) = client.read_with_ret(media.read_cmd, addr, media.block_bytes)?;
+        if ret != 0 {
+            bail!("verify read failed at {} {addr}: status {ret}", media.unit);
+        }
+        let got = data.context("missing data buffer")?;
+        if let Some(off) = first_mismatch(want, &got) {
+            bail!(
+                "verify failed at {} {addr}: first mismatch at byte offset 0x{off:x}",
+                media.unit
+            );
         }
     }
-
-    let _ = client.cmd_void(CMD_START_SMC, 0);
     Ok(())
 }
 
@@ -694,13 +651,12 @@ fn write_emmc(
 // DemoN helpers
 // ---------------------------------------------------------------------------
 
-fn demon_list(progress: &mut dyn Progress) -> Result<()> {
-    use crate::demon::usb::UsbClient;
-    match UsbClient::open() {
-        Ok(_) => plog!(progress, "DemoN device found"),
-        Err(e) => plog!(progress, "DemoN device not found: {e}"),
+fn demon_list(progress: &mut dyn Progress) {
+    if DemonUsb::is_present() {
+        plog!(progress, "DemoN device found");
+    } else {
+        plog!(progress, "DemoN device not found");
     }
-    Ok(())
 }
 
 fn demon_info(progress: &mut dyn Progress) -> Result<()> {
@@ -709,10 +665,24 @@ fn demon_info(progress: &mut dyn Progress) -> Result<()> {
 
     plog!(progress, "DemoN Device Information:");
     plog!(progress, "  Device ID: {:?}", info.device_id);
-    plog!(progress, "  Protocol Version: 0x{:04x}", info.protocol_version);
-    plog!(progress, "  Firmware Version: 0x{:04x}", info.firmware_version);
+    plog!(
+        progress,
+        "  Protocol Version: 0x{:04x}",
+        info.protocol_version
+    );
+    plog!(
+        progress,
+        "  Firmware Version: 0x{:04x}",
+        info.firmware_version
+    );
     plog!(progress, "  Flash ID: 0x{:04x}", info.nand_id);
     plog!(progress, "  Mode: {:?}", info.mode);
+    if info.left_bootloader {
+        plog!(
+            progress,
+            "  Note: device was in bootloader mode and was switched to firmware mode"
+        );
+    }
 
     if let Some(manufacturer) = client.get_manufacturer_name() {
         plog!(progress, "  Manufacturer: {}", manufacturer);
@@ -724,7 +694,11 @@ fn demon_info(progress: &mut dyn Progress) -> Result<()> {
         plog!(progress, "    Page Size: {} bytes", nand_info.page_size);
         plog!(progress, "    Spare Size: {} bytes", nand_info.spare_size);
         plog!(progress, "    Chip Size: {} MiB", nand_info.chip_size);
-        plog!(progress, "    Pages Per Block: {}", nand_info.pages_per_block);
+        plog!(
+            progress,
+            "    Pages Per Block: {}",
+            nand_info.pages_per_block
+        );
         plog!(progress, "    Total Blocks: {}", nand_info.num_blocks());
         plog!(
             progress,
@@ -741,13 +715,12 @@ fn demon_info(progress: &mut dyn Progress) -> Result<()> {
 // LPC / XFlash helpers
 // ---------------------------------------------------------------------------
 
-fn lpc_list(progress: &mut dyn Progress) -> Result<()> {
-    use crate::lpc::usb::UsbClient;
-    match UsbClient::open() {
-        Ok(_) => plog!(progress, "LPC/XFlash device found"),
-        Err(e) => plog!(progress, "LPC/XFlash device not found: {e}"),
+fn lpc_list(progress: &mut dyn Progress) {
+    if LpcUsb::is_present() {
+        plog!(progress, "LPC/XFlash device found");
+    } else {
+        plog!(progress, "LPC/XFlash device not found");
     }
-    Ok(())
 }
 
 fn lpc_info(progress: &mut dyn Progress) -> Result<()> {
@@ -770,7 +743,11 @@ fn lpc_info(progress: &mut dyn Progress) -> Result<()> {
             plog!(progress, "  Meta Type: {}", config.meta_type);
             plog!(progress, "  Block Size: 0x{:X} bytes", config.block_size);
             plog!(progress, "  Size Blocks: 0x{:X}", config.size_blocks);
-            plog!(progress, "  Size Small Blocks: 0x{:X}", config.size_small_blocks);
+            plog!(
+                progress,
+                "  Size Small Blocks: 0x{:X}",
+                config.size_small_blocks
+            );
             plog!(progress, "  File Blocks: 0x{:X}", config.file_blocks);
             plog!(
                 progress,
@@ -803,5 +780,47 @@ mod tests {
     #[test]
     fn emmc_config_is_not_a_nand_size() {
         assert!(pages_from_flash_config(0xC046_2002).is_err());
+    }
+
+    #[test]
+    fn plan_read_defaults_to_rest_of_device() {
+        assert_eq!(
+            plan_read(&NAND_MEDIA, 0x100, None, Some(0x8000)).unwrap(),
+            0x7F00
+        );
+        assert_eq!(plan_read(&EMMC_MEDIA, 0, Some(10), Some(10)).unwrap(), 10);
+    }
+
+    #[test]
+    fn plan_read_validates_explicit_count_against_size() {
+        assert!(plan_read(&EMMC_MEDIA, 5, Some(10), Some(10)).is_err());
+        assert!(plan_read(&EMMC_MEDIA, 10, None, Some(10)).is_err());
+        assert!(plan_read(&EMMC_MEDIA, u32::MAX, Some(2), Some(10)).is_err());
+    }
+
+    #[test]
+    fn plan_read_unknown_size() {
+        assert!(plan_read(&NAND_MEDIA, 0, None, None).is_err());
+        assert_eq!(plan_read(&NAND_MEDIA, 4, Some(3), None).unwrap(), 3);
+        assert!(plan_read(&NAND_MEDIA, u32::MAX, Some(2), None).is_err());
+    }
+
+    #[test]
+    fn plan_write_uses_whole_file_or_count() {
+        let len = 8 * NAND_BLOCK_BYTES as u64;
+        assert_eq!(plan_write(&NAND_MEDIA, len, 0, None, Some(100)).unwrap(), 8);
+        assert_eq!(
+            plan_write(&NAND_MEDIA, len, 2, Some(3), Some(100)).unwrap(),
+            3
+        );
+        assert!(plan_write(&NAND_MEDIA, len, 0, Some(9), Some(100)).is_err());
+    }
+
+    #[test]
+    fn plan_write_rejects_bad_sizes_and_ranges() {
+        assert!(plan_write(&NAND_MEDIA, NAND_BLOCK_BYTES as u64 + 1, 0, None, None).is_err());
+        let len = 8 * EMMC_BLOCK_BYTES as u64;
+        assert!(plan_write(&EMMC_MEDIA, len, 95, None, Some(100)).is_err());
+        assert!(plan_write(&EMMC_MEDIA, len, u32::MAX - 2, None, None).is_err());
     }
 }

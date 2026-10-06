@@ -13,14 +13,7 @@ enum class Device {
     PicoFlasher = NANDPRO_DEV_PICOFLASHER,
     Lpc = NANDPRO_DEV_LPC,
     Jrp = NANDPRO_DEV_JRP,
-    Demon = NANDPRO_DEV_DEMON,
-    Esp = NANDPRO_DEV_ESP
-};
-
-enum class Adapter {
-    Auto = NANDPRO_ADAPTER_AUTO,
-    Usb = NANDPRO_ADAPTER_USB,
-    Tcp = NANDPRO_ADAPTER_TCP
+    Demon = NANDPRO_DEV_DEMON
 };
 
 enum class Media {
@@ -34,9 +27,8 @@ struct ReadOptions {
     uint32_t start = 0;
     std::optional<uint32_t> count;
     Device device = Device::Auto;
-    Adapter adapter = Adapter::Auto;
     Media media = Media::Auto;
-    std::string endpoint; // Serial port path or IP:port address
+    std::string serial; // USB serial port path (PicoFlasher); empty = auto-detect
 };
 
 struct WriteOptions {
@@ -44,9 +36,8 @@ struct WriteOptions {
     uint32_t start = 0;
     std::optional<uint32_t> count;
     Device device = Device::Auto;
-    Adapter adapter = Adapter::Auto;
     Media media = Media::Auto;
-    std::string endpoint; // Serial port path or IP:port address
+    std::string serial; // USB serial port path (PicoFlasher); empty = auto-detect
     bool erase = true;
     bool verify = false;
 };
@@ -55,7 +46,15 @@ struct Result {
     bool success = false;
     int error_code = -1;
     double elapsed_seconds = 0.0;
+    std::string error; // Filled from nandpromax_last_error() when error_code != 0
 };
+
+namespace detail {
+inline std::string lastError() {
+    const char *msg = nandpromax_last_error();
+    return msg ? std::string(msg) : std::string();
+}
+} // namespace detail
 
 /**
  * Read NAND or eMMC flash using any hardware flasher device (C++ wrapper).
@@ -67,13 +66,12 @@ inline Result readNand(const ReadOptions& opts) {
         opts.start,
         opts.count.value_or(0),
         opts.count.has_value(),
-        static_cast<NandProDeviceC>(opts.device),
-        static_cast<NandProAdapterC>(opts.adapter),
-        static_cast<NandProMediaC>(opts.media),
-        opts.endpoint.empty() ? nullptr : opts.endpoint.c_str(),
+        static_cast<int>(opts.device),
+        static_cast<int>(opts.media),
+        opts.serial.empty() ? nullptr : opts.serial.c_str(),
         &elapsed
     );
-    return Result{ rc == 0, rc, elapsed };
+    return Result{ rc == 0, rc, elapsed, rc == 0 ? std::string() : detail::lastError() };
 }
 
 /**
@@ -86,15 +84,14 @@ inline Result writeNand(const WriteOptions& opts) {
         opts.start,
         opts.count.value_or(0),
         opts.count.has_value(),
-        static_cast<NandProDeviceC>(opts.device),
-        static_cast<NandProAdapterC>(opts.adapter),
-        static_cast<NandProMediaC>(opts.media),
-        opts.endpoint.empty() ? nullptr : opts.endpoint.c_str(),
+        static_cast<int>(opts.device),
+        static_cast<int>(opts.media),
+        opts.serial.empty() ? nullptr : opts.serial.c_str(),
         opts.erase,
         opts.verify,
         &elapsed
     );
-    return Result{ rc == 0, rc, elapsed };
+    return Result{ rc == 0, rc, elapsed, rc == 0 ? std::string() : detail::lastError() };
 }
 
 } // namespace NandProMax

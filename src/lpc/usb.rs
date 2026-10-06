@@ -16,10 +16,29 @@ pub struct UsbClient {
     handle: DeviceHandle<rusb::Context>,
     endpoint_in: u8,
     endpoint_out: u8,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     interface_detached: bool,
 }
 
 impl UsbClient {
+    /// Whether an LPC/XFlash device is currently enumerated on the USB bus.
+    ///
+    /// Only reads descriptors; it never opens or claims the device, so it has
+    /// no kernel-driver side effects.
+    pub fn is_present() -> bool {
+        let Ok(context) = rusb::Context::new() else {
+            return false;
+        };
+        let Ok(devices) = context.devices() else {
+            return false;
+        };
+        devices.iter().any(|d| {
+            d.device_descriptor()
+                .map(|desc| desc.vendor_id() == LPC_VID && desc.product_id() == LPC_PID)
+                .unwrap_or(false)
+        })
+    }
+
     /// Open a connection to the LPC/XFlash USB device
     pub fn open() -> Result<Self> {
         let context = rusb::Context::new().context("create USB context")?;
@@ -67,6 +86,7 @@ impl UsbClient {
 
     /// Claim the device interface
     fn claim_interface(handle: &mut DeviceHandle<rusb::Context>) -> Result<bool> {
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
         let mut interface_detached = false;
 
         // On Linux, we may need to detach the kernel driver
@@ -152,10 +172,8 @@ impl UsbClient {
 
     /// Device reset (from XFlash.py deviceReset)
     pub fn device_reset(&mut self) -> Result<()> {
-        if let Err(e) = self.handle.reset() {
-            // Ignore reset errors, device might not support it
-            eprintln!("Device reset not supported: {e}");
-        }
+        // Reset errors are intentionally ignored: the device might not support it.
+        let _ = self.handle.reset();
         self.handle
             .set_active_configuration(1)
             .context("set configuration after reset")?;

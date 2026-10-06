@@ -81,12 +81,14 @@ pub enum FlashSelection {
     External = 1,
 }
 
-impl From<u8> for FlashSelection {
-    fn from(value: u8) -> Self {
+impl TryFrom<u8> for FlashSelection {
+    type Error = anyhow::Error;
+
+    fn try_from(value: u8) -> Result<Self> {
         match value {
-            0 => FlashSelection::Internal,
-            1 => FlashSelection::External,
-            _ => panic!("Invalid flash selection"),
+            0 => Ok(FlashSelection::Internal),
+            1 => Ok(FlashSelection::External),
+            _ => anyhow::bail!("device reported invalid flash selection {value:#04x}"),
         }
     }
 }
@@ -142,6 +144,9 @@ pub struct DeviceInfo {
     pub firmware_version: u16,
     pub nand_id: u16,
     pub mode: DeviceMode,
+    /// The device was found in bootloader mode and was asked to leave it
+    /// during `init`.
+    pub left_bootloader: bool,
 }
 
 /// DemoN NAND client
@@ -160,13 +165,17 @@ impl DemonClient {
 
     /// Initialize the device and get device info
     pub fn init(&mut self) -> Result<&DeviceInfo> {
-        if self.info.is_some() {
-            return Ok(self.info.as_ref().unwrap());
+        if self.info.is_none() {
+            let info = self.probe_info()?;
+            self.info = Some(info);
         }
+        self.info.as_ref().context("device info missing after init")
+    }
 
+    fn probe_info(&mut self) -> Result<DeviceInfo> {
         let mode = self.get_mode()?;
-        if mode == DeviceMode::Bootloader {
-            eprintln!("DemoN is in bootloader mode. Attempting to exit...");
+        let left_bootloader = mode == DeviceMode::Bootloader;
+        if left_bootloader {
             self.leave_bootloader_mode()?;
             // Wait for re-enumeration
             std::thread::sleep(std::time::Duration::from_secs(1));
@@ -179,15 +188,14 @@ impl DemonClient {
         let firmware_version = self.get_firmware_version()?;
         let nand_id = self.read_flash_id()?;
 
-        self.info = Some(DeviceInfo {
+        Ok(DeviceInfo {
             device_id,
             protocol_version,
             firmware_version,
             nand_id,
             mode: DeviceMode::Firmware,
-        });
-
-        Ok(self.info.as_ref().unwrap())
+            left_bootloader,
+        })
     }
 
     /// Get current mode
@@ -219,7 +227,7 @@ impl DemonClient {
     pub fn get_ext_flash(&mut self) -> Result<FlashSelection> {
         self.usb.write_byte(Command::GetExtFlash as u8)?;
         let loc = self.usb.read_byte()?;
-        Ok(FlashSelection::from(loc))
+        FlashSelection::try_from(loc)
     }
 
     /// Set flash selection
@@ -286,6 +294,21 @@ impl DemonClient {
     /// Get invalid/block blocks list
     pub fn get_invalid_blocks(&mut self) -> Result<Vec<u16>> {
         self.acquire_flash()?;
+        let result = self.read_invalid_blocks();
+        match result {
+            Ok(blocks) => {
+                self.release_flash()?;
+                Ok(blocks)
+            }
+            Err(e) => {
+                // Don't leave the flash acquired / SB reset asserted; the original error wins.
+                let _ = self.release_flash();
+                Err(e)
+            }
+        }
+    }
+
+    fn read_invalid_blocks(&mut self) -> Result<Vec<u16>> {
         self.usb.write_byte(Command::GetInvalidBlocks as u8)?;
 
         let mut buf = [0u8; 2];
@@ -308,7 +331,6 @@ impl DemonClient {
             blocks.push(block);
         }
 
-        self.release_flash()?;
         Ok(blocks)
     }
 
@@ -518,15 +540,6 @@ const NAND_DEVICES: &[NandDevice] = &[
         pages_per_block: 32,
         big_block: false,
     },
-    NandDevice {
-        id: 0x73,
-        name: "256MiB",
-        page_size: 512,
-        spare_size: 16,
-        chip_size: 256,
-        pages_per_block: 32,
-        big_block: false,
-    },
     // Big block chips
     NandDevice {
         id: 0xF2,
@@ -575,4 +588,38 @@ pub fn get_manufacturer_by_id(id: u8) -> Option<&'static str> {
 pub fn get_nand_device_by_id(flash_id: u16) -> Option<&'static NandDevice> {
     let device_id = (flash_id & 0xFF) as u8;
     NAND_DEVICES.iter().find(|d| d.id == device_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nand_device_ids_are_unique() {
+        for (i, a) in NAND_DEVICES.iter().enumerate() {
+            for b in &NAND_DEVICES[i + 1..] {
+                assert_ne!(a.id, b.id, "duplicate NAND device id {:#04x}", a.id);
+            }
+        }
+    }
+
+    #[test]
+    fn id_0x73_is_16mib_and_0x71_is_256mib() {
+        assert_eq!(get_nand_device_by_id(0x73).unwrap().chip_size, 16);
+        assert_eq!(get_nand_device_by_id(0x71).unwrap().chip_size, 256);
+    }
+
+    #[test]
+    fn flash_selection_rejects_unexpected_byte() {
+        assert!(matches!(
+            FlashSelection::try_from(0),
+            Ok(FlashSelection::Internal)
+        ));
+        assert!(matches!(
+            FlashSelection::try_from(1),
+            Ok(FlashSelection::External)
+        ));
+        assert!(FlashSelection::try_from(2).is_err());
+        assert!(FlashSelection::try_from(0xff).is_err());
+    }
 }
