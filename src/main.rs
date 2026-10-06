@@ -1,23 +1,20 @@
-mod commands;
-mod demon;
-mod flasher;
-mod interface;
-mod lpc;
-mod picoflasher;
-mod progress;
-mod tcp;
-mod types;
-mod xsvf;
-
 use anyhow::Result;
 use clap::Parser;
 
-use crate::interface::cli::{Cli, EmmcOp, NandOp, Sub, XsvfOp};
-use crate::progress::StderrProgress;
-use crate::types::MediaType;
+use nandpromax::commands;
+use nandpromax::interface::cli::{Cli, EmmcOp, NandOp, Sub, XsvfOp};
+use nandpromax::progress::StderrProgress;
+use nandpromax::types::MediaType;
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    run(cli)?;
+    // The library never prints; the CLI reports success itself.
+    println!("ok");
+    Ok(())
+}
+
+fn run(cli: Cli) -> Result<()> {
     let p = &mut StderrProgress;
 
     match cli.sub {
@@ -30,12 +27,16 @@ fn main() -> Result<()> {
                     range.start,
                     range.count,
                     device.serial,
-                    device.addr,
                     device.timeout_ms,
                     p,
                 )?;
             }
-            NandOp::Write { input, device, range, write } => {
+            NandOp::Write {
+                input,
+                device,
+                range,
+                write,
+            } => {
                 commands::cmd_write_nand(
                     input,
                     device.device,
@@ -45,7 +46,6 @@ fn main() -> Result<()> {
                     write.erase,
                     write.verify,
                     device.serial,
-                    device.addr,
                     device.timeout_ms,
                     p,
                 )?;
@@ -61,12 +61,16 @@ fn main() -> Result<()> {
                     range.start,
                     range.count,
                     device.serial,
-                    device.addr,
                     device.timeout_ms,
                     p,
                 )?;
             }
-            EmmcOp::Write { input, device, range, write } => {
+            EmmcOp::Write {
+                input,
+                device,
+                range,
+                write,
+            } => {
                 commands::cmd_write_nand(
                     input,
                     device.device,
@@ -76,7 +80,6 @@ fn main() -> Result<()> {
                     write.erase,
                     write.verify,
                     device.serial,
-                    device.addr,
                     device.timeout_ms,
                     p,
                 )?;
@@ -93,13 +96,7 @@ fn main() -> Result<()> {
         },
 
         Sub::Info { device } => {
-            commands::cmd_info(
-                device.device,
-                device.serial,
-                device.addr,
-                device.timeout_ms,
-                p,
-            )?;
+            commands::cmd_info(device.device, device.serial, device.timeout_ms, p)?;
         }
 
         Sub::ListDevices => {

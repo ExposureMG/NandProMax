@@ -15,17 +15,13 @@ pub struct DeviceArgs {
     #[arg(short = 'd', long, value_enum)]
     pub device: Option<DeviceType>,
 
-    /// Operation timeout in milliseconds
-    #[arg(long, default_value_t = 3000)]
+    /// Operation timeout in milliseconds (must be at least 1)
+    #[arg(long, default_value_t = 3000, value_parser = clap::value_parser!(u64).range(1..))]
     pub timeout_ms: u64,
 
-    /// USB serial port (e.g. /dev/ttyACM0) — PICO/LPC/JRP
+    /// USB serial port (e.g. /dev/ttyACM0) — PicoFlasher; auto-detected if omitted
     #[arg(long)]
     pub serial: Option<String>,
-
-    /// TCP address:port — ESP / PicoFlasher TCP [default: 192.168.4.1:3232]
-    #[arg(long, default_value = "192.168.4.1:3232")]
-    pub addr: String,
 }
 
 /// Block / LBA range — read and write.
@@ -35,7 +31,7 @@ pub struct RangeArgs {
     #[arg(long, default_value_t = 0)]
     pub start: u32,
 
-    /// Number of blocks / LBAs (default: all)
+    /// Number of blocks / LBAs (default: all; on write, the first N blocks of the input)
     #[arg(long)]
     pub count: Option<u32>,
 }
@@ -43,11 +39,12 @@ pub struct RangeArgs {
 /// Extra write options.
 #[derive(Args, Clone, Debug)]
 pub struct WriteArgs {
-    /// Erase block before writing
+    /// Currently has no effect: the tool never issues an erase itself; whether a
+    /// write erases first is up to the device firmware
     #[arg(long, action = ArgAction::Set, default_value_t = true)]
     pub erase: bool,
 
-    /// Verify block after writing
+    /// Read each block back after writing it and compare; abort on the first mismatch
     #[arg(long)]
     pub verify: bool,
 }
@@ -98,8 +95,11 @@ pub enum Sub {
 
     /// Bridge hardware over TCP (LPC / DemoN)
     ServeTcp {
-        /// Bind address:port
-        #[arg(long, default_value = "0.0.0.0:8383")]
+        /// Bind address:port. The server has no authentication: anyone who can
+        /// connect can read and write the flash. Binding 0.0.0.0 exposes the
+        /// flasher to the whole network; keep the loopback default unless you
+        /// trust that network
+        #[arg(long, default_value = "127.0.0.1:8383")]
         bind: String,
 
         /// Hardware device to serve
@@ -196,4 +196,24 @@ pub enum XsvfOp {
         #[command(flatten)]
         device: DeviceArgs,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timeout_must_be_positive() {
+        assert!(Cli::try_parse_from(["nandpromax", "info", "--timeout-ms", "0"]).is_err());
+        assert!(Cli::try_parse_from(["nandpromax", "info", "--timeout-ms", "1"]).is_ok());
+    }
+
+    #[test]
+    fn serve_tcp_defaults_to_loopback() {
+        let cli = Cli::try_parse_from(["nandpromax", "serve-tcp"]).unwrap();
+        match cli.sub {
+            Sub::ServeTcp { bind, .. } => assert_eq!(bind, "127.0.0.1:8383"),
+            _ => panic!("expected serve-tcp"),
+        }
+    }
 }

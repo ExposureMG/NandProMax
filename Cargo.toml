@@ -2,20 +2,20 @@
 name = "nandpromax"
 version = "0.0.1"
 edition = "2021"
+description = "Cross-platform Xbox 360 NAND/eMMC flasher (PicoFlasher, LPC/XFlash, TX DemoN)"
+license = "GPL-2.0-only"
+repository = "https://github.com/ExposureMG/nandpromax"
+readme = "README.md"
+rust-version = "1.85"
+keywords = ["xbox360", "nand", "emmc", "flasher", "usb"]
+categories = ["command-line-utilities", "hardware-support"]
 
 [lib]
 name = "nandpromax"
-crate-type = ["cdylib", "staticlib"]
-
-[build-dependencies]
-cc = "1.0"
+crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serialport = "4"
 rusb = "0.9"
-libc = "0.2"
-eh0 = { package = "embedded-hal", version = "0.2.7", features = ["unproven"] }
-eh1 = { package = "embedded-hal", version = "1" }
-ehnb1 = { package = "embedded-hal-nb", version = "1" }

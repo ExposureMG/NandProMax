@@ -12,11 +12,30 @@ pub struct UsbClient {
     handle: DeviceHandle<rusb::Context>,
     endpoint_in: u8,
     endpoint_out: u8,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     interface_detached: bool,
 }
 
 #[allow(dead_code)]
 impl UsbClient {
+    /// Whether a DemoN device is currently enumerated on the USB bus.
+    ///
+    /// Only reads descriptors; it never opens or claims the device, so it has
+    /// no kernel-driver side effects.
+    pub fn is_present() -> bool {
+        let Ok(context) = rusb::Context::new() else {
+            return false;
+        };
+        let Ok(devices) = context.devices() else {
+            return false;
+        };
+        devices.iter().any(|d| {
+            d.device_descriptor()
+                .map(|desc| desc.vendor_id() == DEMON_VID && desc.product_id() == DEMON_PID)
+                .unwrap_or(false)
+        })
+    }
+
     /// Open a connection to the DemoN USB device
     pub fn open() -> Result<Self> {
         let context = rusb::Context::new().context("create USB context")?;
@@ -97,6 +116,7 @@ impl UsbClient {
 
     /// Claim the device interface
     fn claim_interface(handle: &mut DeviceHandle<rusb::Context>) -> Result<bool> {
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
         let mut interface_detached = false;
 
         // On Linux, we may need to detach the kernel driver
@@ -182,7 +202,7 @@ impl UsbClient {
         let timeout = Duration::from_millis(timeout_ms);
         match self.handle.read_bulk(self.endpoint_in, buf, timeout) {
             Ok(len) => Ok(len),
-            Err(e) if e == rusb::Error::Timeout => Ok(0),
+            Err(rusb::Error::Timeout) => Ok(0),
             Err(e) => bail!("Variable read failed: {e}"),
         }
     }

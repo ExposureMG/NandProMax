@@ -1,5 +1,6 @@
 //! LPC/XFlash USB device support for NAND interaction
 
+#[allow(clippy::module_inception)]
 pub mod lpc;
 pub mod usb;
 

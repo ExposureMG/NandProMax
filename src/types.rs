@@ -10,15 +10,6 @@ pub enum DeviceType {
     Jrp,
     /// TX DemoN
     Demon,
-    /// ESPFlasher / PicoFlasher over TCP
-    Esp,
-}
-
-/// Internal use only — not exposed to CLI since ESP now covers the TCP case.
-#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AdapterType {
-    Usb,
-    Tcp,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]

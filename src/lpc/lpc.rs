@@ -45,68 +45,48 @@ impl FlashConfig {
 
         let page_size = 0x200;
         let meta_size = 0x10;
-        let mut meta_type = 0u8;
-        let mut block_size = 0u32;
-        let mut size_blocks = 0u32;
-        let mut file_blocks = 0u32;
 
-        match controller_type {
-            0 => {
-                meta_type = 0;
-                block_size = 0x20;
-                match block_type {
-                    0 => bail!("nand type 0:0 is invalid"),
-                    1 => {
-                        size_blocks = 0x400;
-                        file_blocks = 0x3E0;
-                    }
-                    2 => {
-                        size_blocks = 0x800;
-                        file_blocks = 0x7C0;
-                    }
-                    3 => {
-                        size_blocks = 0x1000;
-                        file_blocks = 0xF80;
-                    }
-                    _ => bail!("unknown block type {} for controller type 0", block_type),
+        // Unsupported combinations leave size_blocks at 0, rejected below.
+        let (meta_type, block_size, size_blocks, file_blocks): (u8, u32, u32, u32) =
+            match controller_type {
+                0 => {
+                    let (size_blocks, file_blocks) = match block_type {
+                        0 => bail!("nand type 0:0 is invalid"),
+                        1 => (0x400, 0x3E0),
+                        2 => (0x800, 0x7C0),
+                        3 => (0x1000, 0xF80),
+                        _ => bail!("unknown block type {} for controller type 0", block_type),
+                    };
+                    (0, 0x20, size_blocks, file_blocks)
                 }
-            }
-            1 => {
-                if block_type == 0 {
-                    bail!("nand type 1:0 is invalid")
-                }
-                meta_type = 1;
-                block_size = 0x20;
-                if block_type == 1 {
-                    size_blocks = 0x400;
-                    file_blocks = 0x3E0;
-                }
-            }
-            2 => {
-                meta_type = 1;
-                block_size = 0x20;
-                if block_type == 1 {
-                    size_blocks = 0x1000;
-                    file_blocks = 0xF80;
-                } else if block_type == 2 || block_type == 3 {
-                    meta_type = 2;
-                    if block_type == 2 {
-                        block_size = 0x100;
-                        size_blocks = (1u64
-                            << (((config >> 19) & 3) + ((config >> 21) & 15) + 23)
-                            >> 17) as u32;
-                        file_blocks = 0x1E0;
-                    } else if block_type == 3 {
-                        block_size = 0x200;
-                        size_blocks = (1u64
-                            << (((config >> 19) & 3) + ((config >> 21) & 15) + 23)
-                            >> 18) as u32;
-                        file_blocks = 0xF0;
+                1 => {
+                    if block_type == 0 {
+                        bail!("nand type 1:0 is invalid")
+                    }
+                    if block_type == 1 {
+                        (1, 0x20, 0x400, 0x3E0)
+                    } else {
+                        (1, 0x20, 0, 0)
                     }
                 }
-            }
-            _ => bail!("controller type {} is invalid", controller_type),
-        }
+                2 => match block_type {
+                    1 => (1, 0x20, 0x1000, 0xF80),
+                    2 => (
+                        2,
+                        0x100,
+                        (1u64 << (((config >> 19) & 3) + ((config >> 21) & 15) + 23) >> 17) as u32,
+                        0x1E0,
+                    ),
+                    3 => (
+                        2,
+                        0x200,
+                        (1u64 << (((config >> 19) & 3) + ((config >> 21) & 15) + 23) >> 18) as u32,
+                        0xF0,
+                    ),
+                    _ => (1, 0x20, 0, 0),
+                },
+                _ => bail!("controller type {} is invalid", controller_type),
+            };
 
         if size_blocks == 0 {
             bail!(
@@ -206,18 +186,17 @@ impl LpcClient {
 
     /// Initialize flash access
     pub fn flash_init(&mut self) -> Result<&FlashConfig> {
-        if self.flash_config.is_some() {
-            return Ok(self.flash_config.as_ref().unwrap());
+        if self.flash_config.is_none() {
+            self.usb
+                .control_transfer(Command::DataInit as u8, 0, 0, None)?;
+            let config_raw = self.usb.read_u32()?;
+
+            let config = FlashConfig::parse(config_raw).context("Failed to parse flash config")?;
+            self.flash_config = Some(config);
         }
-
-        self.usb
-            .control_transfer(Command::DataInit as u8, 0, 0, None)?;
-        let config_raw = self.usb.read_u32()?;
-
-        let config = FlashConfig::parse(config_raw).context("Failed to parse flash config")?;
-
-        self.flash_config = Some(config);
-        Ok(self.flash_config.as_ref().unwrap())
+        self.flash_config
+            .as_ref()
+            .context("flash config missing after init")
     }
 
     /// Deinitialize flash access
