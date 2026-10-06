@@ -1,13 +1,28 @@
-# PicoFlasher (VID: 0x600d, PID: 0x7001) & RP2040 (VID: 0x2e8a)
-SUBSYSTEM=="usb", ATTRS{idVendor}=="600d", ATTRS{idProduct}=="7001", MODE="0666", TAG+="uaccess"
-SUBSYSTEM=="tty", ATTRS{idVendor}=="600d", ATTRS{idProduct}=="7001", MODE="0666", TAG+="uaccess"
-SUBSYSTEM=="usb", ATTRS{idVendor}=="2e8a", MODE="0666", TAG+="uaccess"
-SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", MODE="0666", TAG+="uaccess"
+# udev rules for NandProMax (https://github.com/ExposureMG/nandpromax)
+#
+# Install (Linux):
+#   sudo cp 69-npm.rules /etc/udev/rules.d/69-npm.rules
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#   then unplug and replug the device
+#
+# The file must sort before 73-seat-late.rules, which applies the uaccess tag.
+#
+# TAG+="uaccess" grants access to the user logged in at the local seat
+# (systemd-logind). Headless/SSH sessions are not covered: add your user to
+# the "dialout" group (serial ports) or write a local rule with GROUP=/MODE=.
 
-# LPC
-SUBSYSTEM=="usb", ATTRS{idVendor}=="ffff", ATTRS{idProduct}=="0004", MODE="0666", TAG+="uaccess"
+# PicoFlasher (VID 0x600d, PID 0x7001)
+SUBSYSTEM=="usb", ATTRS{idVendor}=="600d", ATTRS{idProduct}=="7001", TAG+="uaccess"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="600d", ATTRS{idProduct}=="7001", TAG+="uaccess"
 
-# TX DemoN
-SUBSYSTEM=="usb", ATTRS{idVendor}=="11d4", ATTRS{idProduct}=="444e", MODE="0666", TAG+="uaccess"
+# RP2040 / Raspberry Pi Pico (VID 0x2e8a)
+# The product IDs used by PicoFlasher builds are not defined in this repository
+# (the CLI matches on vendor ID only), so this rule is vendor-wide.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="2e8a", TAG+="uaccess"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", TAG+="uaccess"
 
+# LPC / XFlash (JRP v2, NAND-X, ...) (VID 0xffff, PID 0x0004)
+SUBSYSTEM=="usb", ATTRS{idVendor}=="ffff", ATTRS{idProduct}=="0004", TAG+="uaccess"
 
+# TX DemoN (VID 0x11d4, PID 0x444e)
+SUBSYSTEM=="usb", ATTRS{idVendor}=="11d4", ATTRS{idProduct}=="444e", TAG+="uaccess"
